@@ -1,0 +1,74 @@
+// server/prisma/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// User model
+model User {
+  id        String   @id @default(uuid())
+  username  String   @unique
+  email     String   @unique
+  password  String
+  rating    Int      @default(1200)
+  wins      Int      @default(0)
+  losses    Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  matchesAsPlayer1 Match[] @relation("Player1Matches")
+  matchesAsPlayer2 Match[] @relation("Player2Matches")
+  matchesWon       Match[] @relation("MatchWinner")
+  matchesLost      Match[] @relation("MatchLoser")
+
+  @@map("users")
+}
+
+// Problem model
+model Problem {
+  id          String   @id @default(uuid())
+  shortCode   String   @unique
+  title       String
+  description String
+  difficulty  String   @default("EASY") // EASY, MEDIUM, HARD
+  createdAt   DateTime @default(now())
+
+  matches Match[]
+
+  @@map("problems")
+}
+
+// Match model
+model Match {
+  id String @id @default(uuid())
+
+  // Relations to Problems and Users
+  problemId String
+  problem   Problem @relation(fields: [problemId], references: [id])
+
+  player1Id String
+  player1   User   @relation("Player1Matches", fields: [player1Id], references: [id])
+
+  player2Id String
+  player2   User   @relation("Player2Matches", fields: [player2Id], references: [id])
+
+  winnerId String?
+  winner   User?   @relation("MatchWinner", fields: [winnerId], references: [id])
+  
+  loserId  String?
+  loser    User?   @relation("MatchLoser", fields: [loserId], references: [id])
+
+  winnerRatingChange Int?
+  loserRatingChange  Int?
+
+  // Match state
+  status    String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
+  createdAt DateTime  @default(now())
+  endedAt   DateTime?
+
+  @@map("matches")
+}
