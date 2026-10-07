@@ -1,157 +1,81 @@
-# Code Clash ⚔️
+# Code Clash
 
-Code Clash is a real-time multiplayer coding platform where developers can challenge each other, solve programming problems, and execute code in real-time. It provides an interactive and competitive environment designed to test and improve your coding skills.
+A multiplayer coding app where two players join a match, solve a set of problems, and follow each other's progress. There is also a standalone code sandbox for running programs without entering a battle.
 
----
+React, TypeScript, and Monaco handle the browser interface. An Express server manages accounts and Socket.IO matches, PostgreSQL stores users and match records through Prisma, and Judge0 runs submitted code.
 
-## ✨ Key Features
+## Included
 
-- 🏎️ **Real-Time Multiplayer Battles:** Connect instantly with other developers via WebSocket and compete head-to-head.
-- ⚡ **Live Code Execution:** Safely execute code in various languages with isolated, containerized environments powered by Judge0.
-- 💻 **Premium Editor Experience:** Integrated **Monaco Editor** provides advanced syntax highlighting, auto-completion, and an authentic VS Code-like feel.
-- 🎨 **Modern & Responsive UI:** Crafted with **Tailwind CSS**, ensuring a beautiful experience across all devices.
-- 🔄 **Instant Synchronization:** Real-time state management and immediate visual feedback powered by **Socket.IO** and **Zustand**.
+- Account registration and login, with profile and match history screens.
+- A matchmaking queue, timed battles, progress updates, and a post-match summary.
+- A Monaco editor with language selection, standard input, and execution output.
+- A separate sandbox backed by the Judge0 API.
 
----
+The sandbox sends code to Judge0 for execution. Live battles currently use fixed problem sets and simulated test-case results, with parts of the post-match summary also hardcoded. Matchmaking stores a placeholder problem record; a complete battle judge is still to be added.
 
-## 🛠 Tech Stack
+## Run locally
 
-### Frontend
-- **Framework**: React 19 + Vite
-- **Language**: TypeScript
-- **Styling**: Tailwind CSS
-- **State Management**: Zustand
-- **Code Editor**: Monaco Editor (`@monaco-editor/react`)
-- **Data Fetching**: React Query
-- **Routing**: React Router DOM
-
-### Backend
-- **Runtime**: Node.js
-- **Framework**: Express.js
-- **Language**: TypeScript
-- **Real-Time Communication**: Socket.IO
-- **Database ORM**: Prisma
-- **Database**: PostgreSQL
-
-### Code Execution
-- **Engine**: Judge0 (v1.13.1)
-
----
-
-## 📁 Project Structure
-
-The repository is organized into three main modules:
-
-```text
-code-clash/
-├── client/              # 🖥️ React frontend application
-│   ├── src/             # Source code (components, pages, store, etc.)
-│   └── package.json     
-├── server/              # ⚙️ Node.js + Express backend API and WebSockets
-│   ├── src/             # Controllers, routes, and socket logic
-│   ├── prisma/          # Database schema and migrations
-│   └── package.json     
-└── judge0/              # 🛡️ Code execution engine (Dockerized)
-    └── judge0-v1.13.1/  # Configuration and docker-compose files
-```
-
----
-
-## 📋 Prerequisites
-
-Before you begin, ensure you have the following installed on your machine:
-- **Node.js** (v18 or higher)
-- **npm** (or yarn/pnpm)
-- **PostgreSQL** (running locally or a cloud instance)
-- **Docker & Docker Compose** (required for running Judge0)
-
----
-
-## 🚀 How to Run Locally
-
-Follow these instructions to get your local development environment up and running.
-
-<details open>
-<summary><b>Step 1: Start the Code Execution Engine (Judge0)</b></summary>
-<br>
-
-Judge0 handles securely running user code. It must be running for the platform to evaluate submissions.
+Use Node.js 22.12+, PostgreSQL, and a running Judge0 instance. Docker Compose configuration for Judge0 is included in `judge0/judge0-v1.13.1/`.
 
 ```bash
-cd judge0/judge0-v1.13.1
-docker-compose up -d
-```
-*Note: This will pull the necessary Docker images and start Judge0 on your machine (usually on port 2358).*
-</details>
-
-<details open>
-<summary><b>Step 2: Setup the Backend (Server)</b></summary>
-<br>
-
-Install dependencies and start the Node.js server.
-
-```bash
+git clone https://github.com/kailashp-27/Code-Clash.git
+cd Code-Clash
+npm install
 cd server
 npm install
 ```
 
-**Environment Variables:** Create a `.env` file in the `server` directory.
+The root installation is needed because the current server imports `bcrypt` and `jsonwebtoken` from dependencies declared there.
+
+Create `server/.env`:
+
 ```env
-# Example .env for Server
-DATABASE_URL="postgresql://username:password@localhost:5432/codeclash"
+DATABASE_URL=postgresql://username:password@localhost:5432/codeclash
+JWT_SECRET=replace-with-your-own-random-secret
 PORT=5000
-# Update this if your local Judge0 is running on a different port/IP
-JUDGE0_API_URL="http://localhost:2358" 
+JUDGE0_URL=http://localhost:2358
 ```
 
-**Database Setup:**
+Create the `codeclash` database in PostgreSQL, then run from `server/`:
+
 ```bash
-# Generate Prisma Client
 npx prisma generate
-# Push the schema to the database
 npx prisma db push
-```
-
-**Run Server:**
-```bash
 npm run dev
 ```
-</details>
 
-<details open>
-<summary><b>Step 3: Setup the Frontend (Client)</b></summary>
-<br>
-
-Install dependencies and start the Vite development server.
+In a second terminal, from the repository root:
 
 ```bash
 cd client
 npm install
-```
-
-**Environment Variables:** Create a `.env` file in the `client` directory.
-```env
-# Example .env for Client
-VITE_API_URL="http://localhost:5000"
-```
-
-**Run Client:**
-```bash
 npm run dev
 ```
-The application should now be accessible at `http://localhost:5173`.
-</details>
 
----
+Open [localhost:5173](http://localhost:5173). The client proxies `/api` requests to port 5000. Socket.IO also defaults to that port; `VITE_SOCKET_URL` can override the socket address, but some account requests still use `localhost:5000` directly.
 
-## 📝 Important Notes & Troubleshooting
+### Judge0 setup
 
-- **Database Connection:** Ensure your PostgreSQL server is actively running before starting the backend, or Prisma will throw a connection error.
-- **Judge0 Initialization:** The Judge0 docker containers might take a minute or two to fully initialize the first time you run them. If code execution fails initially, wait a moment and try again.
-- **CORS Issues:** If the frontend cannot communicate with the backend or Judge0, ensure that the CORS settings in `server/src/index.ts` (or similar) allow requests from `http://localhost:5173`.
+Start the bundled Judge0 stack in a separate terminal:
 
----
+```bash
+cd judge0/judge0-v1.13.1
+docker compose up -d
+```
 
-<div align="center">
-  <i>Let the code battles begin! ⚔️</i>
-</div>
+The Compose stack publishes PostgreSQL on port 5432 as well as Judge0 on port 2358. If your application database already uses 5432, change the Judge0 database's host port mapping before starting the stack.
+
+Check [localhost:5000/health](http://localhost:5000/health) for the app server and [localhost:2358/languages](http://localhost:2358/languages) for Judge0.
+
+## Code guide
+
+| Path | Purpose |
+| --- | --- |
+| `client/src/pages/` | Login, battles, profiles, and sandbox pages |
+| `client/src/components/` | Editor, navigation, and match summary |
+| `server/src/index.ts` | API setup and Judge0 execution requests |
+| `server/src/socket.ts` | Queue and live match events |
+| `server/prisma/schema.prisma` | User, problem, and match records |
+| `judge0/` | Local code execution configuration |
+
+From `client/`, use `npm run build` to build the app and `npm run lint` to check the source.
