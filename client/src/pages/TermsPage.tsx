@@ -1,98 +1,17 @@
-import { Terminal, Scale, AlertTriangle, Zap, ServerCrash } from 'lucide-react';
-
+import { Link } from 'react-router-dom';
+import { Shield, Swords, Clock, Code, Scale } from 'lucide-react';
+const rules = [
+  { icon: Swords, title: 'One opponent. The same challenge.', text: 'Ranked matches pair two signed-in accounts near their rating. Both receive the same two problems and private test suite.' },
+  { icon: Code, title: 'Correctness comes first', text: 'Write a complete program in JavaScript, Python, C++ or Java. Run Code checks public examples. Submit checks every test on the server. Passing some tests does not solve a problem.' },
+  { icon: Clock, title: 'Thirty minutes to make it count', text: 'The first player to solve both problems wins. Submission receipt order decides a close finish, not judge worker speed. At the deadline, already-received submissions finish judging; more solved problems wins, and equal counts draw.' },
+  { icon: Scale, title: 'Earn your rating', text: 'Ranked results use Elo with K=32, including draws. Leaving a battle forfeits it. A disconnected account has 30 seconds to return while the opponent remains online. If both leave, the match is cancelled. Judge infrastructure failures can cancel a battle without rating changes.' },
+  { icon: Shield, title: 'Compete fairly', text: 'Prohibited assistance and copying can be reported after a battle. AI authorship is currently not assessed; code similarity alone is not proof of misconduct. Three moderator-confirmed violations on distinct battle problems trigger a ban from play. Duplicate reports and pending findings add no strikes. You can appeal confirmed findings from Account Standing, and moderators can reverse decisions. Authorized moderators can inspect reported source and evidence; hidden judge diagnostics remain private. Integrity reports do not rewrite completed results or Elo. An ongoing match is cancelled without rating changes if a participant is banned.' },
+];
 export default function TermsPage() {
-  return (
-    <div className="flex-1 h-full overflow-y-auto w-full p-4 md:p-8 relative z-10 text-zinc-300">
-      <div className="mb-12 text-center">
-        <h1 className="text-4xl md:text-5xl font-bold font-['Orbitron'] tracking-wider text-transparent bg-clip-text bg-gradient-to-r from-green-400 via-emerald-500 to-teal-600 mb-4 drop-shadow-[0_0_15px_rgba(74,222,128,0.3)]">
-          TERMS OF ENGAGEMENT
-        </h1>
-        <p className="text-zinc-400 text-lg max-w-2xl mx-auto">
-          System protocols and rules of combat for the CodeFight arena. By accessing the network, you accept these directives.
-        </p>
-      </div>
-
-      <div className="space-y-8">
-        <section className="bg-black/40 backdrop-blur-xl border border-zinc-800/60 rounded-2xl p-8 relative overflow-hidden group hover:border-zinc-700 transition-colors">
-          <div className="absolute top-0 left-0 w-1 h-full bg-blue-500 shadow-[0_0_15px_rgba(59,130,246,0.6)]" />
-          <div className="flex items-center gap-4 mb-4">
-            <div className="p-3 bg-blue-500/10 rounded-xl border border-blue-500/20">
-              <Terminal className="text-blue-400" size={24} />
-            </div>
-            <h2 className="text-2xl font-semibold text-white font-['Orbitron'] tracking-wide">1. System Introduction</h2>
-          </div>
-          <p className="text-zinc-400 leading-relaxed ml-[68px]">
-            Welcome to CodeFight. By accessing or using our competitive coding arena, you agree to be bound by these Terms and Conditions. Please read them carefully before initializing any combat sequences.
-          </p>
-        </section>
-
-        <section className="bg-black/40 backdrop-blur-xl border border-zinc-800/60 rounded-2xl p-8 relative overflow-hidden group hover:border-zinc-700 transition-colors">
-          <div className="absolute top-0 left-0 w-1 h-full bg-red-500 shadow-[0_0_15px_rgba(239,68,68,0.6)]" />
-          <div className="flex items-center gap-4 mb-4">
-            <div className="p-3 bg-red-500/10 rounded-xl border border-red-500/20">
-              <AlertTriangle className="text-red-400" size={24} />
-            </div>
-            <h2 className="text-2xl font-semibold text-white font-['Orbitron'] tracking-wide">2. Operator Conduct</h2>
-          </div>
-          <ul className="space-y-3 ml-[68px] text-zinc-400">
-            <li className="flex items-start gap-3">
-              <div className="mt-1.5 w-1.5 h-1.5 rounded-full bg-red-500 shadow-[0_0_5px_rgba(239,68,68,0.8)] flex-shrink-0" />
-              <p>Operators must not use automated tools, bots, or external APIs to solve ranked match algorithms.</p>
-            </li>
-            <li className="flex items-start gap-3">
-              <div className="mt-1.5 w-1.5 h-1.5 rounded-full bg-red-500 shadow-[0_0_5px_rgba(239,68,68,0.8)] flex-shrink-0" />
-              <p>Exploiting logic flaws, deploying DDoS attacks, or maliciously disrupting the execution environment constitutes an immediate and permanent network ban.</p>
-            </li>
-            <li className="flex items-start gap-3">
-              <div className="mt-1.5 w-1.5 h-1.5 rounded-full bg-red-500 shadow-[0_0_5px_rgba(239,68,68,0.8)] flex-shrink-0" />
-              <p>Maintain professional protocols. CodeFight has zero tolerance for harassment in match debriefs or public comms channels.</p>
-            </li>
-          </ul>
-        </section>
-
-        <section className="bg-black/40 backdrop-blur-xl border border-zinc-800/60 rounded-2xl p-8 relative overflow-hidden group hover:border-zinc-700 transition-colors">
-          <div className="absolute top-0 left-0 w-1 h-full bg-purple-500 shadow-[0_0_15px_rgba(168,85,247,0.6)]" />
-          <div className="flex items-center gap-4 mb-4">
-            <div className="p-3 bg-purple-500/10 rounded-xl border border-purple-500/20">
-              <Scale className="text-purple-400" size={24} />
-            </div>
-            <h2 className="text-2xl font-semibold text-white font-['Orbitron'] tracking-wide">3. Intellectual Property</h2>
-          </div>
-          <p className="text-zinc-400 leading-relaxed ml-[68px]">
-            Any code compiled inside the arena is considered a public competitive entry. CodeFight retains the right to display, execute, analyze, and archive your algorithms for match replays and global leaderboards.
-          </p>
-        </section>
-
-        <section className="bg-black/40 backdrop-blur-xl border border-zinc-800/60 rounded-2xl p-8 relative overflow-hidden group hover:border-zinc-700 transition-colors">
-          <div className="absolute top-0 left-0 w-1 h-full bg-yellow-500 shadow-[0_0_15px_rgba(234,179,8,0.6)]" />
-          <div className="flex items-center gap-4 mb-4">
-            <div className="p-3 bg-yellow-500/10 rounded-xl border border-yellow-500/20">
-              <Zap className="text-yellow-400" size={24} />
-            </div>
-            <h2 className="text-2xl font-semibold text-white font-['Orbitron'] tracking-wide">4. Sudden Death Directives</h2>
-          </div>
-          <p className="text-zinc-400 leading-relaxed ml-[68px]">
-            During tied engagements proceeding to the "Sudden Death" Phase, all rulings by the master referee engine are absolute. Hidden test parameters are heavily encrypted and will not be disclosed under any circumstances.
-          </p>
-        </section>
-
-        <section className="bg-black/40 backdrop-blur-xl border border-zinc-800/60 rounded-2xl p-8 relative overflow-hidden group hover:border-zinc-700 transition-colors">
-          <div className="absolute top-0 left-0 w-1 h-full bg-zinc-500 shadow-[0_0_15px_rgba(113,113,122,0.6)]" />
-          <div className="flex items-center gap-4 mb-4">
-            <div className="p-3 bg-zinc-500/10 rounded-xl border border-zinc-500/20">
-              <ServerCrash className="text-zinc-400" size={24} />
-            </div>
-            <h2 className="text-2xl font-semibold text-white font-['Orbitron'] tracking-wide">5. System Liability</h2>
-          </div>
-          <p className="text-zinc-400 leading-relaxed ml-[68px]">
-            CodeFight is provided "as is". The Administration is not responsible for dropped ELO ratings resulting from network disconnects, client crashes, or server node outages during an active engagement.
-          </p>
-        </section>
-      </div>
-      
-      <div className="mt-12 text-center text-zinc-500 text-sm">
-        <p>Last Updated: Version 2.4.1 (System Epoch)</p>
-      </div>
+  return <main style={{ flex: 1, overflowY: 'auto', padding: '40px 24px', color: '#e8eaf0', background: '#070a11' }}>
+    <div style={{ maxWidth: 900, margin: '0 auto' }}><p style={{ color: '#00e5ff', fontSize: 12, letterSpacing: 2 }}>THE ARENA PLAYBOOK</p><h1 style={{ fontFamily: 'Space Grotesk, sans-serif', fontSize: 36 }}>Clear rules. Fair battles.</h1><p style={{ color: '#a3abc2', marginBottom: 28 }}>How the current ranked arena works.</p>
+      {rules.map(rule => <section key={rule.title} style={{ border: '1px solid #252b40', borderRadius: 16, padding: 24, marginBottom: 16, background: 'linear-gradient(135deg,#131a2d,#0d1220)' }}><rule.icon size={24} color="#00e5ff" aria-hidden="true" /><h2 style={{ fontSize: 20, margin: '12px 0' }}>{rule.title}</h2><p style={{ color: '#a3abc2', lineHeight: 1.8 }}>{rule.text}</p></section>)}
+      <Link to="/" style={{ color: '#00e5ff' }}>Return to the arena</Link>
     </div>
-  );
+  </main>;
 }

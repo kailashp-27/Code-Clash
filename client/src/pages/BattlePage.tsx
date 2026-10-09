@@ -4,6 +4,8 @@ import { Shield, Zap, ChevronRight, Users, Timer, TrendingUp } from 'lucide-reac
 
 import { useSocketStore } from '../stores/useSocketStore';
 import type { MatchFoundPayload } from '../socket/events';
+import { readSessionUser } from '../utils/session';
+import { apiUrl } from '../utils/api';
 
 export const BattlePage = () => {
   const [hoveredCard, setHoveredCard] = useState<string | null>(null);
@@ -11,9 +13,22 @@ export const BattlePage = () => {
   const navigate = useNavigate();
   const socket = useSocketStore((s) => s.socket);
   const isConnected = useSocketStore((s) => s.isConnected);
+  const connectionError = useSocketStore((s) => s.connectionError);
+  const activeMatch = useSocketStore((s) => s.activeMatch);
+  const [queueError, setQueueError] = useState('');
+  const signedIn = !!readSessionUser();
 
   const [isQueuing, setIsQueuing] = useState(false);
   const [queueSeconds, setQueueSeconds] = useState(0);
+
+  useEffect(() => {
+    if (!signedIn) return;
+    const controller = new AbortController();
+    fetch(apiUrl('/api/matches/active'), { headers: { Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` }, signal: controller.signal })
+      .then(async response => { if (!response.ok) return; const match = await response.json() as MatchFoundPayload | null; if (!controller.signal.aborted) useSocketStore.setState({ activeMatch: match }); })
+      .catch(() => { /* Socket recovery remains available if this request fails. */ });
+    return () => controller.abort();
+  }, [signedIn]);
 
   const queueTimeLabel = useMemo(() => {
     const minutes = Math.floor(queueSeconds / 60);
@@ -22,12 +37,12 @@ export const BattlePage = () => {
   }, [queueSeconds]);
 
   useEffect(() => {
-    if (!isQueuing) return;
+    if (!isQueuing || !isConnected) return;
     const intervalId = window.setInterval(() => {
       setQueueSeconds((s) => s + 1);
     }, 1000);
     return () => window.clearInterval(intervalId);
-  }, [isQueuing]);
+  }, [isQueuing, isConnected]);
 
   useEffect(() => {
     if (!socket) {
@@ -46,38 +61,54 @@ export const BattlePage = () => {
     };
 
     socket.on('match_found', onMatchFound);
+    const onStatus = ({ status }: { status: 'queued' | 'idle' }) => {
+      setIsQueuing(status === 'queued');
+      if (status === 'queued') setQueueError('');
+      if (status === 'idle') setQueueSeconds(0);
+    };
+    const onError = ({ message }: { message: string }) => {
+      setQueueError(message);
+      setIsQueuing(false);
+      setQueueSeconds(0);
+    };
+    socket.on('queue_status', onStatus);
+    socket.on('server_error', onError);
     return () => {
       console.log(`[BattlePage] Cleaning up match_found listener on socket ${socket.id}`);
       socket.off('match_found', onMatchFound);
+      socket.off('queue_status', onStatus);
+      socket.off('server_error', onError);
     };
   }, [socket, navigate]);
 
   useEffect(() => {
-    if (!isConnected) {
+    if (!socket) return;
+    const onDisconnect = () => {
       setIsQueuing(false);
       setQueueSeconds(0);
-    }
-  }, [isConnected]);
+    };
+    socket.on('disconnect', onDisconnect);
+    return () => { socket.off('disconnect', onDisconnect); };
+  }, [socket]);
 
   const handleJoinRankedQueue = () => {
-    console.log("Queue Button Clicked! Socket state:", socket?.connected);
-    if (!socket) {
-      console.warn("No socket found.");
+    if (!localStorage.getItem('token')) {
+      navigate('/login');
       return;
     }
-    if (isQueuing) return;
-    
-    // Attempt to manually connect if disconnected
-    if (!socket.connected) {
-      socket.connect();
+    setQueueError('');
+    if (activeMatch) { navigate(`/battle/${activeMatch.roomId}`); return; }
+    if (isQueuing) {
+      socket?.emit('leave_queue');
+      return;
     }
-
-    const userStr = localStorage.getItem('user');
-    const currentUser = userStr ? JSON.parse(userStr) : null;
-
-    setIsQueuing(true);
+    if (!socket?.connected) {
+      useSocketStore.getState().connect();
+      socket?.connect();
+      return;
+    }
     setQueueSeconds(0);
-    socket.emit('join_queue', { mode: 'ranked', username: currentUser?.username });
+    socket.emit('join_queue', { mode: 'ranked' });
   };
 
   return (
@@ -112,6 +143,7 @@ export const BattlePage = () => {
         }}>
           Engage in real-time competitive programming battles.
         </p>
+        <Link to="/leaderboard" style={{ display: 'inline-block', color: '#00e5ff', marginTop: 16, fontSize: 13 }}>View ranked leaderboard →</Link>
       </div>
 
       {/* ── Cards Grid ── */}
@@ -408,7 +440,7 @@ export const BattlePage = () => {
             position: 'relative',
             zIndex: 1,
           }}>
-            High stakes. 2 Medium problems + 1 Boss round. Climb the global leaderboard.
+            Two shared problems. Private tests. Real Elo. Find an opponent near your rating and race to solve both.
           </p>
 
           {/* Stats Row */}
@@ -423,8 +455,8 @@ export const BattlePage = () => {
           }}>
             {[
               { icon: Users, text: '1v1' },
-              { icon: Timer, text: '45 min' },
-              { icon: TrendingUp, text: 'ELO ±25' },
+              { icon: Timer, text: '30 min' },
+              { icon: TrendingUp, text: 'Rating pairing' },
             ].map(({ icon: StatIcon, text }, i) => (
               <div key={i} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                 <StatIcon size={12} color={hoveredCard === 'ranked' ? '#6b6e90' : '#3d405a'} style={{ transition: 'color 0.3s ease' }} />
@@ -443,7 +475,7 @@ export const BattlePage = () => {
             type="button"
             className="btn-glow"
             onClick={handleJoinRankedQueue}
-            disabled={isQueuing || !socket}
+            disabled={signedIn && !activeMatch && !isConnected && !connectionError}
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -458,8 +490,8 @@ export const BattlePage = () => {
               transition: 'all 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
               position: 'relative',
               zIndex: 1,
-              cursor: isQueuing || !socket ? 'not-allowed' : 'pointer',
-              opacity: isQueuing || !socket ? 0.75 : 1,
+              cursor: 'pointer',
+              opacity: signedIn && !isConnected ? 0.75 : 1,
               ...(hoveredCard === 'ranked' ? {
                 background: 'linear-gradient(135deg, #f97316 0%, #ea580c 100%)',
                 color: '#fff',
@@ -472,12 +504,14 @@ export const BattlePage = () => {
               }),
             }}
           >
-            {isQueuing ? `Searching... (${queueTimeLabel})` : 'Queue for Ranked'}
+            {isQueuing ? `Cancel search (${queueTimeLabel})` : !signedIn ? 'Sign in to play Ranked' : activeMatch ? 'Resume battle' : !isConnected ? 'Reconnect' : 'Queue for Ranked'}
             <ChevronRight size={14} style={{
               transition: 'transform 0.35s cubic-bezier(0.4, 0, 0.2, 1)',
               transform: hoveredCard === 'ranked' ? 'translateX(4px)' : 'translateX(0)',
             }} />
           </button>
+          {isQueuing && <p style={{ color: '#7a7e9a', marginTop: '10px', fontSize: '12px' }}>Searching for a player near your rating…</p>}
+          {(queueError || connectionError) && <p role="alert" style={{ color: '#f87171', marginTop: '10px', fontSize: '12px' }}>{queueError || connectionError}</p>}
         </div>
       </div>
     </div>

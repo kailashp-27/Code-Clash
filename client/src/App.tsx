@@ -5,6 +5,9 @@ import { LiveBattlePage } from './pages/LiveBattlePage';
 import AuthPage from './pages/AuthPage';
 import ProfilePage from './pages/ProfilePage';
 import TermsPage from './pages/TermsPage';
+import SandboxPage from './pages/SandboxPage';
+import LeaderboardPage from './pages/LeaderboardPage';
+import IntegrityPage from './pages/IntegrityPage';
 
 function App() {
   return (
@@ -16,9 +19,13 @@ function App() {
           
           {/* Main Navigation Pages */}
           <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/leaderboard" element={<LeaderboardPage />} />
+          <Route path="/standing" element={<IntegrityPage />} />
+          <Route path="/moderation" element={<IntegrityPage moderation />} />
           <Route path="/login" element={<AuthPage />} />
           <Route path="/auth" element={<Navigate to="/login" replace />} />
           <Route path="/terms" element={<TermsPage />} />
+          <Route path="/ide" element={<SandboxPage />} />
           
           {/* Fallback */}
           <Route path="*" element={<Navigate to="/" replace />} />

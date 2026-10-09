@@ -1,28 +1,12 @@
-import { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { User, Zap, LogOut } from 'lucide-react';
+import { useState } from 'react';
+import { Link, useLocation } from 'react-router-dom';
+import { User, Zap, ShieldCheck } from 'lucide-react';
+import { readSessionUser } from '../utils/session';
 
 export const Navbar = () => {
-  const [username, setUsername] = useState<string | null>(null);
+  useLocation(); // Re-read the session when login/logout navigates to a new route.
+  const username = readSessionUser()?.username ?? null;
   const [profileHover, setProfileHover] = useState(false);
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    const userStr = localStorage.getItem('user');
-    if (userStr) {
-      try {
-        const user = JSON.parse(userStr);
-        setUsername(user.username);
-      } catch (e) {}
-    }
-  }, []);
-
-  const handleLogout = () => {
-    localStorage.removeItem('token');
-    localStorage.removeItem('user');
-    setUsername(null);
-    navigate('/');
-  };
 
   return (
     <nav
@@ -53,6 +37,7 @@ export const Navbar = () => {
       <div className="flex items-center gap-3">
         {username ? (
           <>
+            <Link to="/standing" title="Account standing and appeals" aria-label="Account standing and appeals" className="text-[#8cb3cc] p-2"><ShieldCheck size={17} /></Link>
             <Link
               to="/profile"
               className="flex items-center gap-2.5 no-underline"
@@ -92,33 +77,7 @@ export const Navbar = () => {
                 color: '#e8eaf0',
               }}>{username}</span>
             </Link>
-            <button
-              onClick={handleLogout}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                width: '34px',
-                height: '34px',
-                borderRadius: '8px',
-                background: 'rgba(248, 113, 113, 0.06)',
-                border: '1px solid rgba(248, 113, 113, 0.1)',
-                cursor: 'pointer',
-                transition: 'all 0.2s ease',
-                color: '#f87171',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'rgba(248, 113, 113, 0.12)';
-                e.currentTarget.style.borderColor = 'rgba(248, 113, 113, 0.25)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'rgba(248, 113, 113, 0.06)';
-                e.currentTarget.style.borderColor = 'rgba(248, 113, 113, 0.1)';
-              }}
-              title="Sign out"
-            >
-              <LogOut size={14} />
-            </button>
+
           </>
         ) : (
           <Link

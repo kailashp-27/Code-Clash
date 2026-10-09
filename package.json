@@ -1,20 +1,29 @@
 {
-  "name": "code-fight",
+  "name": "code-clash",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "private": true,
+  "description": "Code Clash local development commands",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "setup": "node scripts/setup.cjs",
+    "dev": "node scripts/dev.cjs",
+    "dev:client": "npm --prefix client run dev",
+    "dev:server": "npm --prefix server run dev",
+    "build": "npm --prefix server run build && npm --prefix client run build",
+    "check": "npm --prefix client run lint && npm run build",
+    "test": "npm --prefix server run build && node --test tests/*.test.cjs",
+    "test:integration": "node scripts/test-integration.cjs",
+    "doctor": "node scripts/doctor.cjs",
+    "infra:up": "node scripts/infra.cjs up",
+    "infra:down": "node scripts/infra.cjs down",
+    "db:generate": "npm --prefix server run db:generate",
+    "db:push": "npm --prefix server run db:push",
+    "db:migrate": "npm --prefix server run db:migrate"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
-  "dependencies": {
-    "@types/bcrypt": "^6.0.0",
-    "@types/jsonwebtoken": "^9.0.10",
-    "bcrypt": "^6.0.0",
-    "jsonwebtoken": "^9.0.3",
-    "lucide-react": "^1.14.0"
+  "engines": {
+    "node": "^22.12.0 || >=24.0.0"
   }
 }

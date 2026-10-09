@@ -17,13 +17,22 @@ model User {
   rating    Int      @default(1200)
   wins      Int      @default(0)
   losses    Int      @default(0)
+  draws     Int      @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  bannedAt DateTime?
+  banReason String?
 
   matchesAsPlayer1 Match[] @relation("Player1Matches")
   matchesAsPlayer2 Match[] @relation("Player2Matches")
   matchesWon       Match[] @relation("MatchWinner")
   matchesLost      Match[] @relation("MatchLoser")
+  submissions Submission[]
+  activeBattle ActivePlayer?
+  achievements UserAchievement[]
+  reportsFiled IntegrityReport[] @relation("ReportAuthor")
+  reportsReceived IntegrityReport[] @relation("ReportSubject")
+  reportsReviewed IntegrityReport[] @relation("ReportReviewer")
 
   @@map("users")
 }
@@ -36,8 +45,13 @@ model Problem {
   description String
   difficulty  String   @default("EASY") // EASY, MEDIUM, HARD
   createdAt   DateTime @default(now())
+  topic       String   @default("General")
+  tests       Json?
+  starters    Json?
+  version     Int      @default(1)
 
   matches Match[]
+  assignments MatchProblem[]
 
   @@map("problems")
 }
@@ -69,6 +83,118 @@ model Match {
   status    String    @default("PENDING") // PENDING, IN_PROGRESS, COMPLETED
   createdAt DateTime  @default(now())
   endedAt   DateTime?
+  startedAt DateTime?
+  deadlineAt DateTime?
+  drainUntil DateTime?
+  reason String?
+  rulesVersion String @default("ranked-v1")
+  sequence Int @default(0)
+  player1RatingBefore Int?
+  player2RatingBefore Int?
+  player1RatingAfter Int?
+  player2RatingAfter Int?
+  player1Change Int?
+  player2Change Int?
+  assignments MatchProblem[]
+  submissions Submission[]
+  activePlayers ActivePlayer[]
+
+  @@index([status, deadlineAt])
 
   @@map("matches")
+}
+
+model MatchProblem {
+  id String @id @default(uuid())
+  matchId String
+  match Match @relation(fields: [matchId], references: [id])
+  problemId String
+  problem Problem @relation(fields: [problemId], references: [id])
+  slot Int
+  snapshot Json
+  submissions Submission[]
+  @@unique([matchId, slot])
+  @@unique([matchId, problemId])
+  @@map("match_problems")
+}
+
+model ActivePlayer {
+  userId String @id
+  user User @relation(fields: [userId], references: [id])
+  matchId String
+  match Match @relation(fields: [matchId], references: [id])
+  @@index([matchId])
+  @@map("active_players")
+}
+
+model Submission {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  matchId String
+  match Match @relation(fields: [matchId], references: [id])
+  assignmentId String
+  assignment MatchProblem @relation(fields: [assignmentId], references: [id])
+  problemId String
+  requestId String
+  language String
+  sourceCode String
+  sourceHash String
+  mode String
+  sequence Int
+  state String @default("QUEUED")
+  verdict String?
+  passed Int @default(0)
+  total Int
+  time Float?
+  memory Int?
+  receivedAt DateTime @default(now())
+  finishedAt DateTime?
+  cases Json @default("[]")
+  compileOutput String?
+  attempts Int @default(0)
+  leaseUntil DateTime?
+  leaseOwner String?
+  integrity Json?
+  reports IntegrityReport[]
+  @@unique([userId, matchId, requestId])
+  @@unique([matchId, sequence])
+  @@index([state, leaseUntil, receivedAt])
+  @@index([matchId, userId, mode, verdict])
+  @@map("submissions")
+}
+
+model UserAchievement {
+  userId String
+  user User @relation(fields: [userId], references: [id])
+  achievementId String
+  unlockedAt DateTime @default(now())
+  @@id([userId, achievementId])
+  @@map("user_achievements")
+}
+
+model IntegrityReport {
+  id String @id @default(uuid())
+  submissionId String
+  submission Submission @relation(fields: [submissionId], references: [id])
+  matchId String
+  problemId String
+  reporterId String
+  reporter User @relation("ReportAuthor", fields: [reporterId], references: [id])
+  subjectId String
+  subject User @relation("ReportSubject", fields: [subjectId], references: [id])
+  category String
+  details String
+  status String @default("PENDING")
+  createdAt DateTime @default(now())
+  reviewerId String?
+  reviewer User? @relation("ReportReviewer", fields: [reviewerId], references: [id])
+  reviewedAt DateTime?
+  reviewReason String?
+  appeal String?
+  appealedAt DateTime?
+  @@unique([reporterId, submissionId])
+  @@index([subjectId, status])
+  @@index([status, createdAt])
+  @@map("integrity_reports")
 }

@@ -1,352 +1,135 @@
 import type { PrismaClient } from '@prisma/client';
-import { randomUUID } from 'crypto';
-import type { Server as HttpServer } from 'http';
+import type { Server as HttpServer } from 'node:http';
+import jwt from 'jsonwebtoken';
 import { Server } from 'socket.io';
+import { RankedQueue } from './matchmaking.js';
+import { BattleService } from './battles.js';
 
-export interface JoinQueuePayload {
-  mode?: 'ranked';
-  username?: string;
-}
-
-export interface MatchFoundPayload {
-  roomId: string;
-  endTime: number;
-  players: Record<string, { username: string; rating: number }>;
-  problems: {
-    id: string;
-    title: string;
-    description: string;
-    totalTestCases: number;
-  }[];
-}
-
-export interface ClientToServerEvents {
-  join_queue: (payload?: JoinQueuePayload) => void;
-  join_battle: (payload: { roomId: string }) => void;
-  test_case_update: (payload: { roomId: string; passedCases: number; totalCases: number }) => void;
-  forfeit_match: (payload: { roomId: string }) => void;
-  trigger_tiebreaker: (payload: { roomId: string }) => void;
-}
-
-export interface ServerToClientEvents {
-  match_found: (payload: MatchFoundPayload) => void;
-  opponent_test_update: (payload: { passedCases: number; totalCases: number }) => void;
-  battle_sync: (payload: any) => void;
-  match_over: (payload: { winner: string; loser: string; reason: string; ratingChange: number }) => void;
-}
-
-const PLACEHOLDER_PROBLEM_SHORTCODE = 'CC-PLACEHOLDER-001';
-
-async function getOrCreatePlaceholderProblemId(prisma: PrismaClient): Promise<string> {
-  const existing = await prisma.problem.findFirst({
-    select: { id: true },
-    orderBy: { createdAt: 'asc' },
+interface Player { id: string; username: string; rating: number }
+export interface SocketOptions { jwtSecret: string; clientOrigins: string[]; disconnectGraceMs?: number; matchDurationMs?: number; battles?: BattleService }
+export function initSocketServer(httpServer: HttpServer, prisma: PrismaClient, options: SocketOptions) {
+  const io = new Server(httpServer, { cors: { origin: options.clientOrigins, methods: ['GET', 'POST'] } });
+  const battles = options.battles ?? new BattleService(prisma, { judge0Url: 'http://localhost:2358', ...(options.matchDurationMs ? { matchDurationMs: options.matchDurationMs } : {}) });
+  const queue = new RankedQueue();
+  const pairingUsers = new Set<string>();
+  const queueIntents = new Map<string, symbol>();
+  const disconnected = new Map<string, ReturnType<typeof setTimeout>>();
+  const resolving = new Set<string>();
+  let matchmaking = false;
+  const error = (id: string, code: string, message: string) => io.to(id).emit('server_error', { code, message });
+  const hasSocket = (id: string) => [...io.sockets.sockets.values()].some(s => s.data.user?.id === id && s.connected);
+  io.use(async (socket, next) => {
+    try {
+      const token: unknown = socket.handshake.auth?.token;
+      if (typeof token !== 'string') return next(new Error('Sign in to play ranked battles.'));
+      const decoded = jwt.verify(token, options.jwtSecret, { algorithms: ['HS256'] });
+      if (typeof decoded === 'string' || typeof decoded.userId !== 'string') return next(new Error('Invalid session. Please sign in again.'));
+      const user = await prisma.user.findUnique({ where: { id: decoded.userId }, select: { id: true, username: true, rating: true, bannedAt: true } });
+      if (!user) return next(new Error('Account not found. Please sign in again.'));
+      if (user.bannedAt) return next(new Error('Account banned from competitive play. Open account standing to appeal.'));
+      socket.data.user = user;
+      next();
+    } catch { next(new Error('Unable to authenticate. Check your session and try again.')); }
   });
-
-  if (existing) return existing.id;
-
-  const created = await prisma.problem.upsert({
-    where: { shortCode: PLACEHOLDER_PROBLEM_SHORTCODE },
-    update: {},
-    create: {
-      shortCode: PLACEHOLDER_PROBLEM_SHORTCODE,
-      title: 'Placeholder Problem',
-      description: 'Temporary placeholder problem for matchmaking.',
-      difficulty: 'EASY',
-    },
-    select: { id: true },
-  });
-
-  return created.id;
-}
-
-async function ensureUserForSocket(
-  prisma: PrismaClient,
-  socketId: string,
-  socketIdToUserId: Map<string, string>,
-): Promise<{ id: string; rating: number }> {
-  const existingId = socketIdToUserId.get(socketId);
-  if (existingId) {
-    const existing = await prisma.user.findUnique({ where: { id: existingId }, select: { id: true, rating: true } });
-    if (existing) return existing;
-  }
-
-  const created = await prisma.user.create({
-    data: {
-      username: `guest-${socketId}`,
-      email: `guest-${socketId}@codeclash.local`,
-      password: 'guest-password-placeholder',
-    },
-    select: { id: true, rating: true },
-  });
-
-  socketIdToUserId.set(socketId, created.id);
-  return created;
-}
-
-export function initSocketServer(httpServer: HttpServer, prisma: PrismaClient) {
-  // Simple in-memory queue storing socket IDs
-  const rankedQueue: string[] = [];
-  const socketIdToUserId = new Map<string, string>();
-  const socketIdToUsername = new Map<string, string>();
-  const socketIdToRoomId = new Map<string, string>();
-  const roomPlayers = new Map<string, string[]>();
-
-  const handleMatchResolution = async (roomId: string, winnerSocketId: string, loserSocketId: string, reason: string) => {
-    const winnerUserId = socketIdToUserId.get(winnerSocketId);
-    const loserUserId = socketIdToUserId.get(loserSocketId);
-
-    const winnerUsername = socketIdToUsername.get(winnerSocketId) || 'Unknown';
-    const loserUsername = socketIdToUsername.get(loserSocketId) || 'Unknown';
-
-    const RATING_CHANGE = 25;
-
-    io.to(roomId).emit('match_over', { 
-      winner: winnerUsername, 
-      loser: loserUsername, 
-      reason,
-      ratingChange: RATING_CHANGE
-    });
-
-    if (winnerUserId && loserUserId) {
+  async function broadcast(matchId: string) {
+    const sockets = [...io.sockets.sockets.values()].filter(s => s.rooms.has(matchId));
+    for (const socket of sockets) {
       try {
-        await prisma.$transaction([
-          prisma.user.update({
-            where: { id: winnerUserId },
-            data: { rating: { increment: RATING_CHANGE }, wins: { increment: 1 } }
-          }),
-          prisma.user.update({
-            where: { id: loserUserId },
-            data: { rating: { decrement: RATING_CHANGE }, losses: { increment: 1 } }
-          }),
-          prisma.match.updateMany({
-            where: { id: roomId, status: 'IN_PROGRESS' },
-            data: {
-              status: 'COMPLETED',
-              winnerId: winnerUserId,
-              loserId: loserUserId,
-              winnerRatingChange: RATING_CHANGE,
-              loserRatingChange: -RATING_CHANGE,
-              endedAt: new Date()
-            }
-          })
-        ]);
-        console.log(`[matchmaking] Match ${roomId} resolved. ${winnerUsername} won.`);
-      } catch (err) {
-        console.error('[matchmaking] Error updating match stats:', err);
-      }
-    }
-
-    socketIdToRoomId.delete(winnerSocketId);
-    socketIdToRoomId.delete(loserSocketId);
-    roomPlayers.delete(roomId);
-  };
-
-  const triggerForfeit = (socketId: string) => {
-    const roomId = socketIdToRoomId.get(socketId);
-    if (!roomId) return;
-    const playersInRoom = roomPlayers.get(roomId);
-    if (!playersInRoom) return;
-    const loserSocketId = socketId;
-    const winnerSocketId = playersInRoom.find(id => id !== loserSocketId);
-    if (!winnerSocketId) return;
-    handleMatchResolution(roomId, winnerSocketId, loserSocketId, 'forfeit').catch(err => console.error('[Match Resolution Error]', err));
-  };
-
-  const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
-    cors: {
-      origin: ["http://localhost:5173", "http://localhost:5174"],
-      methods: ["GET", "POST"],
-    },
-  });
-
-  async function tryMatchmake(): Promise<void> {
-    console.log(`[matchmaking] tryMatchmake called. Queue: [${rankedQueue.join(', ')}] (size: ${rankedQueue.length})`);
-
-    while (rankedQueue.length >= 2) {
-      const player1SocketId = rankedQueue.shift();
-      const player2SocketId = rankedQueue.shift();
-
-      if (!player1SocketId || !player2SocketId) {
-        console.warn('[matchmaking] Unexpected: shift returned undefined despite length >= 2');
-        return;
-      }
-
-      // Verify both sockets are still connected before creating a match
-      const s1 = io.sockets.sockets.get(player1SocketId);
-      const s2 = io.sockets.sockets.get(player2SocketId);
-
-      if (!s1 || !s2) {
-        console.warn(`[matchmaking] Stale socket detected. s1=${!!s1} s2=${!!s2}. Re-queuing valid socket.`);
-        // Re-queue the one that's still alive
-        if (s1) rankedQueue.push(player1SocketId);
-        if (s2) rankedQueue.push(player2SocketId);
-        continue;
-      }
-
-      const roomId = randomUUID();
-      console.log(`[matchmaking] ✅ MATCH FOUND! Room: ${roomId}`);
-      console.log(`[matchmaking]    Player 1: ${player1SocketId}`);
-      console.log(`[matchmaking]    Player 2: ${player2SocketId}`);
-
-      s1.join(roomId);
-      s2.join(roomId);
-
-      let p1Info, p2Info, problemId;
-      try {
-        problemId = await getOrCreatePlaceholderProblemId(prisma);
-
-        [p1Info, p2Info] = await Promise.all([
-          ensureUserForSocket(prisma, player1SocketId, socketIdToUserId),
-          ensureUserForSocket(prisma, player2SocketId, socketIdToUserId),
-        ]);
-
-        await prisma.match.create({
-          data: {
-            id: roomId,
-            problemId,
-            player1Id: p1Info.id,
-            player2Id: p2Info.id,
-            status: 'IN_PROGRESS',
-          },
-        });
-
-        console.log(`[matchmaking] Match record created in DB (roomId: ${roomId})`);
-      } catch (dbError) {
-        console.error('[matchmaking] ❌ DB error while creating match:', dbError);
-      }
-
-      const p1Name = socketIdToUsername.get(player1SocketId) || "Player 1";
-      const p2Name = socketIdToUsername.get(player2SocketId) || "Player 2";
-      const p1Rating = p1Info?.rating ?? 1200;
-      const p2Rating = p2Info?.rating ?? 1200;
-
-      socketIdToRoomId.set(player1SocketId, roomId);
-      socketIdToRoomId.set(player2SocketId, roomId);
-      roomPlayers.set(roomId, [player1SocketId, player2SocketId]);
-
-      const matchPayload: MatchFoundPayload = {
-        roomId,
-        endTime: Date.now() + 75 * 60 * 1000,
-        players: { 
-          [player1SocketId]: { username: p1Name, rating: p1Rating }, 
-          [player2SocketId]: { username: p2Name, rating: p2Rating } 
-        },
-        problems: [
-          {
-            id: 'mock-1',
-            title: 'Two Sum',
-            description: 'Given an array of integers `nums` and an integer `target`, return indices of the two numbers such that they add up to `target`. You may assume that each input would have exactly one solution, and you may not use the same element twice.',
-            totalTestCases: 10,
-          },
-          {
-            id: 'mock-2',
-            title: 'Valid Parentheses',
-            description: 'Given a string `s` containing just the characters `(`, `)`, `{`, `}`, `[` and `]`, determine if the input string is valid.',
-            totalTestCases: 15,
-          },
-          {
-            id: 'mock-3',
-            title: 'Boss: Merge k Sorted Lists',
-            description: 'You are given an array of `k` linked-lists `lists`, each linked-list is sorted in ascending order. Merge all the linked-lists into one sorted linked-list and return it.',
-            totalTestCases: 25,
-          }
-        ]
-      };
-
-      console.log(`[matchmaking] Emitting match_found to ${player1SocketId} and ${player2SocketId}`);
-      io.to(player1SocketId).emit('match_found', matchPayload);
-      io.to(player2SocketId).emit('match_found', matchPayload);
-      console.log(`[matchmaking] ✅ match_found emitted successfully`);
-    }
-
-    console.log(`[matchmaking] Queue exhausted or < 2 players. Remaining: ${rankedQueue.length}`);
-  }
-
-  io.on('connection', (socket) => {
-    console.log(`[socket] ✅ New connection: ${socket.id}`);
-
-    socket.on('join_queue', async (payload) => {
-      console.log(`[socket] join_queue received from ${socket.id}`);
-      socketIdToUsername.set(socket.id, payload?.username || 'Guest');
-      console.log(`[socket] Queue BEFORE add: [${rankedQueue.join(', ')}] (size: ${rankedQueue.length})`);
-
-      // Prevent duplicate entries
-      if (rankedQueue.includes(socket.id)) {
-        console.log(`[socket] ⚠️ ${socket.id} already in queue. Ignoring.`);
-        return;
-      }
-
-      rankedQueue.push(socket.id);
-      console.log("Current Queue Size:", rankedQueue.length);
-      console.log(`[socket] Queue AFTER add: [${rankedQueue.join(', ')}] (size: ${rankedQueue.length})`);
-
-      try {
-        await tryMatchmake();
-      } catch (error) {
-        // If matchmaking fails, remove the user from the queue to avoid stuck entries.
-        const idx = rankedQueue.indexOf(socket.id);
-        if (idx !== -1) rankedQueue.splice(idx, 1);
-        console.error('[socket] ❌ join_queue/matchmaking failed:', error);
-      }
-    });
-
-    socket.on('join_battle', ({ roomId }) => {
-      socket.join(roomId);
-      console.log(`[socket] User ${socket.id} joined battle room: ${roomId}`);
-      
-      socket.emit('battle_sync', {
-        endTime: Date.now() + 60 * 60 * 1000,
-        phase: 'standard',
-        problems: [
-          { id: 'p1', title: 'Two Sum', difficulty: 'Easy', description: 'Given an array of integers nums and an integer target...', totalTestCases: 4, sampleTestCase: 'Input: nums = [2,7,11,15], target = 9\nOutput: [0,1]' },
-          { id: 'p2', title: 'Valid Parentheses', difficulty: 'Medium', description: 'Given a string s containing just the characters...', totalTestCases: 6, sampleTestCase: 'Input: s = "()[]{}"\nOutput: true' },
-          { id: 'p3', title: 'Trapping Rain Water', difficulty: 'Boss', description: 'Given n non-negative integers representing an elevation map...', totalTestCases: 10, isBoss: true, sampleTestCase: 'Input: height = [0,1,0,2,1,0,1,3,2,1,2,1]\nOutput: 6' }
-        ]
-      });
-    });
-
-    socket.on('test_case_update', ({ roomId, passedCases, totalCases }) => {
-      socket.to(roomId).emit('opponent_test_update', { passedCases, totalCases });
-      if (passedCases === totalCases && totalCases > 0) {
-        const playersInRoom = roomPlayers.get(roomId);
-        if (playersInRoom) {
-          const winnerSocketId = socket.id;
-          const loserSocketId = playersInRoom.find(id => id !== winnerSocketId);
-          if (loserSocketId) {
-            handleMatchResolution(roomId, winnerSocketId, loserSocketId, 'victory').catch(err => console.error('[Match Resolution Error]', err));
-          }
+        const snapshot = await battles.snapshot(matchId, socket.data.user.id);
+        socket.emit('battle_sync', snapshot);
+        if (snapshot.result) {
+          if (snapshot.status === 'CANCELLED') socket.emit('match_cancelled', { roomId: matchId, reason: snapshot.result.reason });
+          else socket.emit('match_over', snapshot.result);
+          void socket.leave(matchId);
         }
+      } catch (e) { console.error('[socket] Sync failed', e instanceof Error ? e.message : 'unknown'); }
+    }
+  }
+  battles.options.onUpdate = broadcast;
+  async function finish(matchId: string, loserId: string, allGone = false) {
+    if (resolving.has(matchId)) return;
+    resolving.add(matchId);
+    try {
+      const snapshot = await battles.snapshot(matchId, loserId);
+      if (snapshot.status !== 'IN_PROGRESS' && snapshot.status !== 'DRAINING') return;
+      const opponent = Object.keys(snapshot.players).find(id => id !== loserId)!;
+      await battles.resolve(matchId, allGone ? null : opponent, allGone ? 'Both players disconnected; ratings unchanged.' : 'Battle ended by forfeit or disconnect grace.', allGone);
+    } catch (e) { error(matchId, 'SAVE_FAILED', 'The result could not be saved. Please try leaving again.'); }
+    finally { resolving.delete(matchId); }
+  }
+  function scheduleDisconnect(userId: string, roomId: string) {
+    if (disconnected.has(userId)) return;
+    disconnected.set(userId, setTimeout(() => {
+      disconnected.delete(userId);
+      void (async () => {
+        if (hasSocket(userId)) return;
+        const snapshot = await battles.snapshot(roomId, userId);
+        const opponent = Object.keys(snapshot.players).find(id => id !== userId)!;
+        await finish(roomId, userId, !hasSocket(opponent));
+      })().catch(e => console.error('[disconnect]', e instanceof Error ? e.message : 'unknown'));
+    }, options.disconnectGraceMs ?? 30000));
+  }
+  async function tryMatchmake() {
+    if (matchmaking) return;
+    matchmaking = true;
+    try {
+      let pair;
+      while ((pair = queue.takePair(Date.now()))) {
+        const [first, second] = pair;
+        const a = io.sockets.sockets.get(first.socketId), b = io.sockets.sockets.get(second.socketId);
+        if (!a?.connected || !b?.connected) { if (a?.connected) queue.add(first); if (b?.connected) queue.add(second); continue; }
+        pairingUsers.add(first.userId); pairingUsers.add(second.userId);
+        try {
+          const snapshot = await battles.createMatch(a.data.user, b.data.user);
+          await a.join(snapshot.roomId); await b.join(snapshot.roomId);
+          // A second tab receives the same battle on reconnect; identity belongs to the account.
+          a.emit('match_found', snapshot);
+          b.emit('match_found', await battles.snapshot(snapshot.roomId, second.userId));
+          for (const id of [first.userId, second.userId]) if (!hasSocket(id)) scheduleDisconnect(id, snapshot.roomId);
+        } catch (e) {
+          console.error('[matchmaking] Failed to create match', e instanceof Error ? e.message : 'unknown');
+          for (const player of pair) { io.to(player.socketId).emit('queue_status', { status: 'idle' }); error(player.socketId, 'MATCH_FAILED', 'Unable to create a match. Please queue again.'); }
+        } finally { pairingUsers.delete(first.userId); pairingUsers.delete(second.userId); }
       }
+    } finally { matchmaking = false; }
+  }
+  io.on('connection', socket => {
+    const user: Player = socket.data.user;
+    const timer = disconnected.get(user.id); if (timer) clearTimeout(timer); disconnected.delete(user.id);
+    void socket.join(`user:${user.id}`);
+    void battles.active(user.id).then(async snapshot => {
+      if (snapshot && socket.connected) { await socket.join(snapshot.roomId); socket.emit('match_found', snapshot); }
+    }).catch(() => error(socket.id, 'RECOVERY_FAILED', 'Unable to recover your battle. Please retry.'));
+    socket.on('join_queue', async () => {
+      if (queue.has(user.id) || pairingUsers.has(user.id) || queueIntents.has(socket.id)) return error(socket.id, 'ALREADY_QUEUED', 'This account is already searching.');
+      const intent = Symbol(); queueIntents.set(socket.id, intent);
+      try {
+        if (await battles.active(user.id)) return error(socket.id, 'ALREADY_PLAYING', 'You already have an active battle.');
+        const fresh = await prisma.user.findUnique({ where: { id: user.id }, select: { id: true, username: true, rating: true, bannedAt: true } });
+        if (fresh?.bannedAt) return error(socket.id, 'ACCOUNT_BANNED', 'Account banned from competitive play. Open account standing to appeal.');
+        if (!fresh || !socket.connected || queueIntents.get(socket.id) !== intent) return;
+        if (pairingUsers.has(user.id) || !queue.add({ userId: fresh.id, socketId: socket.id, username: fresh.username, rating: fresh.rating, joinedAt: Date.now() })) return error(socket.id, 'ALREADY_QUEUED', 'This account is already searching.');
+        socket.data.user = fresh; socket.emit('queue_status', { status: 'queued' }); void tryMatchmake();
+      } catch { error(socket.id, 'QUEUE_FAILED', 'Unable to join the queue. Please retry.'); }
+      finally { if (queueIntents.get(socket.id) === intent) queueIntents.delete(socket.id); }
     });
-
-    socket.on('forfeit_match', ({ roomId }) => {
-      triggerForfeit(socket.id);
+    socket.on('leave_queue', () => { queueIntents.delete(socket.id); if (pairingUsers.has(user.id)) return error(socket.id, 'MATCH_STARTING', 'Your match is starting.'); queue.remove(user.id, socket.id); socket.emit('queue_status', { status: 'idle' }); });
+    socket.on('join_battle', async payload => {
+      try { const snapshot = await battles.snapshot(String(payload?.roomId ?? ''), user.id); await socket.join(snapshot.roomId); socket.emit('battle_sync', snapshot); }
+      catch { error(socket.id, 'NOT_PARTICIPANT', 'This battle is unavailable or belongs to other players.'); }
     });
-
-    socket.on('trigger_tiebreaker', ({ roomId }) => {
-      io.to(roomId).emit('battle_sync', {
-        endTime: Date.now() + 45 * 60 * 1000,
-        phase: 'boss'
-      });
+    socket.on('forfeit_match', async payload => {
+      try { const snapshot = await battles.snapshot(String(payload?.roomId ?? ''), user.id); await finish(snapshot.roomId, user.id); }
+      catch { error(socket.id, 'NOT_PARTICIPANT', 'You are not a player in this battle.'); }
     });
-
-    socket.on('disconnect', (reason) => {
-      console.log(`[socket] ❌ Disconnected: ${socket.id} (reason: ${reason})`);
-      console.log(`[socket] Queue BEFORE disconnect cleanup: [${rankedQueue.join(', ')}] (size: ${rankedQueue.length})`);
-
-      const idx = rankedQueue.indexOf(socket.id);
-      if (idx !== -1) {
-        rankedQueue.splice(idx, 1);
-        console.log(`[socket] Removed ${socket.id} from queue`);
-      }
-
-      socketIdToUserId.delete(socket.id);
-      triggerForfeit(socket.id);
-      console.log(`[socket] Queue AFTER disconnect cleanup: [${rankedQueue.join(', ')}] (size: ${rankedQueue.length})`);
+    socket.on('test_case_update', () => error(socket.id, 'UNTRUSTED_RESULT', 'Only judged submissions can update battle results.'));
+    socket.on('trigger_tiebreaker', () => error(socket.id, 'UNTRUSTED_PHASE', 'Battle phases are controlled by the server.'));
+    socket.on('disconnect', () => {
+      queueIntents.delete(socket.id); queue.remove(user.id, socket.id);
+      void battles.active(user.id).then(snapshot => { if (snapshot && !hasSocket(user.id)) scheduleDisconnect(user.id, snapshot.roomId); }).catch(() => {});
     });
   });
-
-  console.log('[socket] Socket.io server initialized.');
+  const interval = setInterval(() => { void tryMatchmake(); }, 5000); interval.unref();
+  httpServer.on('close', () => { clearInterval(interval); for (const timer of disconnected.values()) clearTimeout(timer); });
   return io;
 }

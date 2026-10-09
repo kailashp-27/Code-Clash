@@ -1,394 +1,146 @@
-import { useNavigate } from 'react-router-dom';
-import { Copy, Share2, Check, X, Swords } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState, type ReactNode } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { ArrowLeft, ArrowRight, Award, Check, ChevronRight, Clock, Flame, LockKeyhole, LogOut, RefreshCw, Shield, Swords, Target, TrendingUp, Trophy, Zap } from 'lucide-react';
+import { apiUrl } from '../utils/api';
+import { useSocketStore } from '../stores/useSocketStore';
+import './ProfilePage.css';
+
+export interface ProfileStats {
+  user: { id: string; username: string; createdAt: string };
+  rating: number; wins: number; losses: number; draws: number; totalBattles: number; winRate: number;
+  currentStreak: number; bestStreak: number; peakRating: number;
+  rank: { name: string; min: number; nextMin: number | null; progress: number };
+  leaderboard: { position: number; total: number; topPercent: number };
+  solvedProblems: number; acceptedSubmissions: number; averageSolveSeconds: number | null; fastestSolveSeconds: number | null;
+  ratingHistory: { matchId: string; rating: number; change: number; at: string }[];
+  topics: { name: string; solved: number; attempted: number }[];
+  achievements: { id: string; title: string; description: string; progress: number; target: number; unlocked: boolean; unlockedAt: string | null }[];
+  recentMatches: { id: string; opponent: string; outcome: 'win' | 'loss' | 'draw'; ratingChange: number | null; createdAt: string; endedAt: string | null; reason: string; problemTitles: string[] }[];
+}
+
+const number = (value: number) => value.toLocaleString();
+const date = (value: string) => new Date(value).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+const duration = (seconds: number | null) => seconds === null ? '—' : seconds < 60 ? `${Math.round(seconds)}s` : `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
+const delta = (change: number) => `${change > 0 ? '+' : ''}${change}`;
+const percent = (value: number) => Math.max(0, Math.min(100, value));
+
+function Panel({ title, eyebrow, action, children, className = '' }: { title: string; eyebrow: string; action?: ReactNode; children: ReactNode; className?: string }) {
+  return <section className={`profile-panel ${className}`}><div className="profile-panel-heading"><div><p className="profile-eyebrow">{eyebrow}</p><h2>{title}</h2></div>{action}</div>{children}</section>;
+}
+
+function ProfileActions({ onSignOut }: { onSignOut: () => void }) {
+  return <nav className="profile-navigation" aria-label="Profile actions"><Link className="profile-button profile-button-lobby" to="/"><ArrowLeft size={15} aria-hidden="true" />Return to lobby</Link><button className="profile-button profile-button-signout" onClick={onSignOut}><LogOut size={15} aria-hidden="true" />Sign out</button></nav>;
+}
+
+function RatingChart({ history }: { history: ProfileStats['ratingHistory'] }) {
+  const chartId = useId();
+  if (!history.length) return <Empty icon={<TrendingUp size={28} />} title="Your journey starts here" text="Complete a ranked battle to record your first rating point." battleLink />;
+  const values = history.map(point => point.rating);
+  const low = Math.floor((Math.min(...values) - 30) / 50) * 50;
+  const high = Math.ceil((Math.max(...values) + 30) / 50) * 50;
+  const coordinates = history.map((point, index) => ({ ...point, x: history.length === 1 ? 400 : 58 + index / (history.length - 1) * 702, y: 190 - (point.rating - low) / (high - low) * 156 }));
+  const path = coordinates.map((point, index) => `${index ? 'L' : 'M'}${point.x.toFixed(1)},${point.y.toFixed(1)}`).join(' ');
+  const latest = history[history.length - 1];
+  return <div className="profile-chart">
+    <svg viewBox="0 0 800 236" role="img" aria-labelledby={`${chartId}-title ${chartId}-desc`}>
+      <title id={`${chartId}-title`}>Rating history over {history.length} ranked battles</title>
+      <desc id={`${chartId}-desc`}>First rating {history[0].rating} on {date(history[0].at)}. Latest rating {latest.rating} on {date(latest.at)}. Exact values are in the accessible rating data table below.</desc>
+      <defs><linearGradient id={`${chartId}-fill`} x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#00e5ff" stopOpacity=".18" /><stop offset="100%" stopColor="#00e5ff" stopOpacity="0" /></linearGradient></defs>
+      {[0, 1, 2, 3].map(tick => <g key={tick}><line x1="58" x2="760" y1={34 + tick * 52} y2={34 + tick * 52} stroke="#252b40" strokeDasharray="4 6" /><text x="43" y={38 + tick * 52} textAnchor="end" fill="#a3abc2" fontSize="12">{Math.round(high - tick / 3 * (high - low))}</text></g>)}
+      {history.length > 1 ? <><path d={`${path} L760,190 L58,190 Z`} fill={`url(#${chartId}-fill)`} /><path d={path} fill="none" stroke="#00e5ff" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" /></> : null}
+      {coordinates.map(point => <circle key={point.matchId} cx={point.x} cy={point.y} r="4" fill="#00e5ff" stroke="#0e1322" strokeWidth="2"><title>{date(point.at)}: {point.rating} Elo ({delta(point.change)})</title></circle>)}
+      <text x="58" y="224" fill="#a3abc2" fontSize="12">{date(history[0].at)}</text><text x="760" y="224" textAnchor="end" fill="#a3abc2" fontSize="12">{date(latest.at)}</text>
+    </svg>
+    <details className="profile-chart-data"><summary>View rating data</summary><div className="profile-table-scroll"><table><caption>Recorded ranked rating changes</caption><thead><tr><th scope="col">Date</th><th scope="col">Rating</th><th scope="col">Change</th><th scope="col">Battle</th></tr></thead><tbody>{history.map(point => <tr key={point.matchId}><td>{date(point.at)}</td><td>{point.rating}</td><td>{delta(point.change)}</td><td><Link to={`/battle/${encodeURIComponent(point.matchId)}`}>View result</Link></td></tr>)}</tbody></table></div></details>
+  </div>;
+}
 
 export default function ProfilePage() {
   const navigate = useNavigate();
-  const [user, setUser] = useState<any>(null);
-  const [profileStats, setProfileStats] = useState<any>(null);
+  const [stats, setStats] = useState<ProfileStats | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [request, setRequest] = useState(0);
+  const [achievementFilter, setAchievementFilter] = useState<'all' | 'earned' | 'locked'>('all');
 
   useEffect(() => {
-    const storedUser = localStorage.getItem('user');
     const token = localStorage.getItem('token');
-    if (storedUser && token) {
-      setUser(JSON.parse(storedUser));
-      fetch('http://localhost:5000/api/profile', {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-        .then(res => res.json())
-        .then(data => setProfileStats(data))
-        .catch(err => console.error(err));
-    } else {
-      navigate('/auth');
+    if (!token) { navigate('/login', { replace: true }); return; }
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort('timeout'), 15000);
+    let active = true;
+    async function load() {
+      try {
+        const response = await fetch(apiUrl('/api/profile'), { headers: { Authorization: `Bearer ${token}` }, signal: controller.signal });
+        if (response.status === 401) { localStorage.removeItem('token'); localStorage.removeItem('user'); navigate('/login', { replace: true }); return; }
+        if (!response.ok) throw new Error('Your profile could not be loaded. Please try again.');
+        const data: ProfileStats = await response.json();
+        if (!data.user || !Array.isArray(data.achievements) || !Array.isArray(data.ratingHistory) || !data.rank || !data.leaderboard) throw new Error('Profile data is temporarily unavailable. Please try again.');
+        if (active) { setStats(data); setError(''); }
+      } catch (failure: unknown) {
+        if (active) setError(controller.signal.aborted ? 'The request timed out. Check your connection and try again.' : failure instanceof Error ? failure.message : 'Your profile could not be loaded. Please try again.');
+      } finally { window.clearTimeout(timeout); if (active) setLoading(false); }
     }
-  }, [navigate]);
+    void load();
+    return () => { active = false; window.clearTimeout(timeout); controller.abort(); };
+  }, [navigate, request]);
 
-  if (!user || !profileStats) return <div className="flex items-center justify-center h-full text-zinc-400">Loading profile...</div>;
+  function refresh() { setLoading(true); setError(''); setRequest(value => value + 1); }
+  function signOut() {
+    localStorage.removeItem('token'); localStorage.removeItem('user');
+    useSocketStore.getState().disconnect(); navigate('/', { replace: true });
+  }
+  if (!stats) return <section aria-label="Player profile" className="clash-profile profile-initial" aria-busy={loading}><ProfileActions onSignOut={signOut} /><div className="profile-initial-icon"><Shield size={32} aria-hidden="true" /></div><p className="profile-eyebrow">YOUR COMPETITIVE IDENTITY</p><h1>{loading ? 'Loading your profile' : 'Unable to load profile'}</h1>{loading ? <p role="status">Fetching your battle history and achievements…</p> : <><p role="alert">{error}</p><button className="profile-button" onClick={refresh}><RefreshCw size={16} aria-hidden="true" />Try again</button></>}</section>;
 
-  const elo = profileStats.rating || 1200;
-  const username = user.username || 'Player';
-  const handle = `@${username.toLowerCase().replace(/\s+/g, '_')}`;
-  const initials = username.substring(0, 2).toUpperCase();
+  const earned = stats.achievements.filter(achievement => achievement.unlocked).length;
+  const achievements = stats.achievements.filter(achievement => achievementFilter === 'all' || (achievementFilter === 'earned' ? achievement.unlocked : !achievement.unlocked));
+  const recordTotal = stats.wins + stats.losses + stats.draws;
+  const latestChange = stats.ratingHistory.length ? stats.ratingHistory[stats.ratingHistory.length - 1].change : null;
 
-  return (
-    <div className="flex-1 h-full overflow-y-auto w-full p-4 md:p-8 text-zinc-300 font-sans space-y-6">
-      
-      {/* SECTION 1: IDENTITY */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 relative shadow-lg">
-        <div className="absolute top-6 right-6 text-right text-xs text-zinc-500">
-          <div>Joined Jan 2025</div>
-          <div className="text-zinc-400 mt-1">Active today</div>
-        </div>
-        
-        <div className="flex items-start gap-4 mb-6">
-          <div className="w-16 h-16 rounded-full bg-blue-100 text-blue-900 flex items-center justify-center text-2xl font-bold shadow-md">
-            {initials}
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold text-white mb-1">{username}</h1>
-            <div className="text-zinc-400 text-sm mb-3">{handle} - CSE - Batch 2026<br/>Arun University</div>
-            
-            <div className="flex flex-wrap items-center gap-3 text-sm">
-               <span className="px-3 py-1 bg-white text-blue-600 rounded-full font-medium shadow-sm flex items-center gap-1">
-                 <span className="text-blue-500">💠</span> Diamond
-               </span>
-               <span className="text-zinc-300">Rating: {elo}</span>
-               <span className="text-zinc-500">Top: 8%</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4 max-w-xl">
-          <div className="flex justify-between text-xs text-zinc-400 mb-2">
-            <span>Diamond progress</span>
-          </div>
-          <div className="h-1.5 w-full bg-zinc-800 rounded-full overflow-hidden flex">
-            <div className="h-full bg-blue-500 w-[60%]" />
-          </div>
-          <div className="flex justify-between text-xs text-zinc-500 mt-2">
-            <span>1600</span>
-            <span>76 rating points to Master</span>
-            <span>1800</span>
-          </div>
-        </div>
-        
-      </div>
-
-      {/* SECTION 2: BATTLE STATS */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-4">BATTLE STATS</h2>
-        <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Total battles</div>
-            <div className="text-2xl font-bold text-white mb-1">{profileStats.totalBattles}</div>
-            <div className="text-[10px] text-zinc-500 leading-tight">Ranked mode</div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Win rate</div>
-            <div className="text-2xl font-bold text-white mb-1">{profileStats.winRate}%</div>
-            <div className="text-[10px] text-zinc-500 leading-tight">{profileStats.wins}W - {profileStats.losses}L</div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Current streak</div>
-            <div className="text-2xl font-bold text-green-400 mb-1 flex items-center gap-1">5W <span className="text-sm">🔥</span></div>
-            <div className="text-[10px] text-zinc-500 leading-tight">Best: 11W</div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Avg solve time</div>
-            <div className="text-2xl font-bold text-white mb-1">18m</div>
-            <div className="text-[10px] text-zinc-500 leading-tight">Fastest: 4m 11s</div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Boss problems</div>
-            <div className="text-2xl font-bold text-white mb-1">14</div>
-            <div className="text-[10px] text-zinc-500 leading-tight">solved of 31 seen</div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50">
-            <div className="text-xs text-zinc-500 mb-1">Peak rating</div>
-            <div className="text-2xl font-bold text-white mb-1">1821</div>
-            <div className="text-[10px] text-zinc-500 leading-tight">Apr 12, 2025</div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION 3: RATING JOURNEY */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-4">RATING JOURNEY</h2>
-        <RatingChart />
-      </div>
-
-      {/* SECTION 4: TOPIC STRENGTH */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-6">TOPIC STRENGTH</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-12 gap-y-4">
-          <TopicBar label="Arrays" percent={91} color="bg-green-500" />
-          <TopicBar label="Recursion" percent={68} color="bg-orange-500" />
-          <TopicBar label="Trees" percent={84} color="bg-green-500" />
-          <TopicBar label="Stack/Queue" percent={78} color="bg-green-500" />
-          <TopicBar label="Strings" percent={75} color="bg-green-500" />
-          <TopicBar label="DP" percent={32} color="bg-red-500" />
-          <TopicBar label="Graphs" percent={61} color="bg-orange-500" />
-          <TopicBar label="Sorting" percent={44} color="bg-red-500" />
-        </div>
-        <div className="flex flex-wrap gap-6 mt-8 text-[11px] text-zinc-400 font-medium">
-           <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-green-500" /> Strong: Arrays, Trees, Strings</div>
-           <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-orange-500" /> Average: Graphs, Recursion</div>
-           <div className="flex items-center gap-2"><div className="w-2 h-2 rounded-full bg-red-500" /> Weak: DP, Sorting</div>
-        </div>
-      </div>
-
-      {/* SECTION 5: MODE PERFORMANCE */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-6">MODE PERFORMANCE</h2>
-        <div className="space-y-4">
-          <ModeBar icon="⚔️" label="Ranked" percent={64} battles={89} color="bg-blue-500" />
-          <ModeBar icon="🎮" label="Casual" percent={60} battles={35} color="bg-blue-400" />
-          <ModeBar icon="⚡" label="Blitz" percent={71} battles={22} color="bg-orange-500" />
-          <ModeBar icon="👁️" label="Blind" percent={44} battles={18} color="bg-purple-500" />
-        </div>
-      </div>
-
-      {/* SECTION 6: ACHIEVEMENTS */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-6">ACHIEVEMENTS  14 / 39</h2>
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">🩸</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">First blood</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">Won first battle</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">🔥</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">On fire</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">7-day streak</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">⚡</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">Blitz king</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">Won 10 blitz rounds</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">🧠</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">Mind reader</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">Won 5 blind battles</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">💠</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">Diamond</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">Reached Diamond tier</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3">
-            <div className="text-2xl">🔄</div>
-            <div>
-              <div className="text-sm font-medium text-white mb-0.5">Comeback kid</div>
-              <div className="text-[10px] text-zinc-500 leading-tight">Win after 5 loss streak</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3 opacity-50">
-            <div className="text-2xl grayscale">🔒</div>
-            <div>
-              <div className="text-sm font-medium text-zinc-500 mb-0.5">???</div>
-              <div className="text-[10px] text-zinc-600 leading-tight">Hidden until earned</div>
-            </div>
-          </div>
-          <div className="bg-[#141415] p-4 rounded-lg border border-zinc-800/50 flex items-center text-left gap-3 opacity-50">
-            <div className="text-2xl grayscale">🔒</div>
-            <div>
-              <div className="text-sm font-medium text-zinc-500 mb-0.5">???</div>
-              <div className="text-[10px] text-zinc-600 leading-tight">Hidden until earned</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* SECTION 7: RECENT BATTLES */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-6">RECENT BATTLES</h2>
-        <div className="space-y-2">
-          {profileStats.recentMatches?.length > 0 ? profileStats.recentMatches.map((m: any) => (
-            <BattleRow 
-              key={m.id} 
-              result={m.isWin ? "WIN" : "LOSS"} 
-              opponent={m.opponent} 
-              mode="Ranked" 
-              elo={m.ratingChange ? (m.ratingChange > 0 ? `+${m.ratingChange}` : `${m.ratingChange}`) : "0"} 
-              details={new Date(m.createdAt).toLocaleDateString()} 
-            />
-          )) : (
-            <div className="text-zinc-500 text-sm">No recent battles.</div>
-          )}
-        </div>
-      </div>
-
-      {/* SECTION 8: SKILL PASSPORT */}
-      <div className="bg-[#1C1C1E] border border-zinc-800/80 rounded-xl p-6 shadow-lg">
-        <h2 className="text-[10px] font-semibold text-zinc-500 tracking-widest uppercase mb-6">SKILL PASSPORT</h2>
-        <div className="bg-[#141415] border border-zinc-800/50 rounded-xl p-6 relative">
-          <div className="text-[10px] text-zinc-500 mb-4 tracking-wide">Verified by CodeClash battle data</div>
-          <div className="text-sm md:text-base text-zinc-300 mb-8 pr-12 leading-relaxed font-medium">
-            "{username.split(' ')[0]} consistently solves medium-level array and graph problems under 20 minutes in live, head-to-head competitive settings."
-          </div>
-          
-          <div className="grid grid-cols-3 gap-4 mb-6">
-             <div>
-               <div className="text-[10px] text-zinc-500 mb-1 uppercase tracking-wider">Rating</div>
-               <div className="text-xl text-white font-medium">{elo}</div>
-             </div>
-             <div>
-               <div className="text-[10px] text-zinc-500 mb-1 uppercase tracking-wider">Tier</div>
-               <div className="text-xl text-white font-medium">Diamond</div>
-             </div>
-             <div>
-               <div className="text-[10px] text-zinc-500 mb-1 uppercase tracking-wider">Win rate</div>
-               <div className="text-xl text-white font-medium">{profileStats.winRate}%</div>
-             </div>
-          </div>
-          
-          <div className="flex items-center justify-between pt-6 border-t border-zinc-800/50 mt-4">
-             <div className="text-[10px] md:text-xs text-zinc-500">codeclash.io/u/{username.toLowerCase().replace(/\s+/g, '_')}</div>
-             <button className="flex items-center gap-2 px-4 py-2 bg-zinc-800/80 hover:bg-zinc-700 rounded-lg text-xs font-medium text-white transition-colors border border-zinc-700/50">
-               <Copy size={14} /> Copy link
-             </button>
-          </div>
-        </div>
-      </div>
-
+  return <section aria-label="Player profile" className="clash-profile" aria-busy={loading}><div className="profile-container">
+    <ProfileActions onSignOut={signOut} />
+    <div className="profile-page-heading"><div><p className="profile-eyebrow">PLAYER INTELLIGENCE</p><h1>Your competitive profile<span>.</span></h1></div><button className="profile-button profile-button-quiet" onClick={refresh} disabled={loading} aria-label={loading ? 'Refreshing profile statistics' : 'Refresh profile statistics'}><RefreshCw size={15} className={loading ? 'profile-spin' : ''} aria-hidden="true" /><span>{loading ? 'Refreshing…' : 'Refresh stats'}</span></button></div>
+    {error ? <div className="profile-error" role="alert">{error} Your last loaded stats are still shown. <button onClick={refresh} disabled={loading}>Retry</button></div> : null}
+    <div className="profile-hero profile-panel">
+      <div className="profile-identity"><div className="profile-avatar" aria-hidden="true">{stats.user.username.slice(0, 2).toUpperCase()}<span><Zap size={12} /></span></div><div><p className="profile-eyebrow">RANKED CONTENDER</p><h2>{stats.user.username}</h2><p className="profile-joined">Joined {date(stats.user.createdAt)}</p><div className="profile-identity-badges"><span className="profile-rank-badge"><Shield size={13} aria-hidden="true" />{stats.rank.name}</span><span><Award size={13} aria-hidden="true" />{earned} achievements earned</span></div></div></div>
+      <div className="profile-hero-rating"><p className="profile-eyebrow">CURRENT ELO</p><div className="profile-rating-value">{number(stats.rating)}<TrendingUp size={26} aria-hidden="true" /></div><p>{latestChange === null ? 'Ready for your first ranked battle' : <><span className={latestChange > 0 ? 'profile-positive' : latestChange < 0 ? 'profile-negative' : ''}>{delta(latestChange)} Elo</span> in your latest battle</>}</p></div>
+      <div className="profile-rank-progress"><div><span>{stats.rank.name}</span><strong>{stats.rank.nextMin === null ? 'Highest tier' : `${number(Math.max(0, stats.rank.nextMin - stats.rating))} Elo to next tier`}</strong></div><progress max="100" value={percent(stats.rank.progress)} aria-label={`${stats.rank.name} tier progress`} /><div className="profile-rank-range"><span>{number(stats.rank.min)} Elo</span><span>{stats.rank.nextMin === null ? 'Keep climbing' : `${number(stats.rank.nextMin)} Elo`}</span></div></div>
     </div>
-  );
+    <div className="profile-stat-grid">
+      <Stat icon={<Swords size={18} />} label="Ranked battles" value={number(stats.totalBattles)} detail={`${stats.wins} wins · ${stats.losses} losses · ${stats.draws} draws`} />
+      <Stat icon={<Target size={18} />} label="Win rate" value={`${stats.winRate.toFixed(1)}%`} detail={stats.totalBattles ? 'Across completed ranked battles' : 'No completed battles yet'} />
+      <Stat icon={<Flame size={18} />} label="Current streak" value={stats.currentStreak ? `${Math.abs(stats.currentStreak)}${stats.currentStreak > 0 ? 'W' : 'L'}` : '0'} detail={`Best winning streak: ${stats.bestStreak}`} />
+      <Stat icon={<Trophy size={18} />} label="Peak rating" value={number(stats.peakRating)} detail={stats.leaderboard.position > 0 ? `#${number(stats.leaderboard.position)} of ${number(stats.leaderboard.total)} players` : 'Leaderboard position unavailable'} />
+    </div>
+    <div className="profile-analysis-grid">
+      <Panel title="Rating journey" eyebrow="EVERY BATTLE LEAVES A MARK" action={<span className="profile-small-tag">Ranked Elo</span>}><RatingChart history={stats.ratingHistory} /></Panel>
+      <Panel title="Battle performance" eyebrow="YOUR RECORD, AT A GLANCE">
+        <div className="profile-record"><div><strong className="profile-positive">{stats.wins}</strong><span>Wins</span></div><div><strong className="profile-negative">{stats.losses}</strong><span>Losses</span></div><div><strong>{stats.draws}</strong><span>Draws</span></div></div>
+        <div className="profile-record-bar" role="img" aria-label={`${stats.wins} wins, ${stats.losses} losses, ${stats.draws} draws`}><span style={{ width: `${recordTotal ? stats.wins / recordTotal * 100 : 0}%` }} /><span style={{ width: `${recordTotal ? stats.losses / recordTotal * 100 : 0}%` }} /><span style={{ width: `${recordTotal ? stats.draws / recordTotal * 100 : 0}%` }} /></div>
+        <dl className="profile-performance-list"><div><dt><Check size={14} aria-hidden="true" />Problems solved</dt><dd>{number(stats.solvedProblems)}</dd></div><div><dt><Zap size={14} aria-hidden="true" />Accepted submissions</dt><dd>{number(stats.acceptedSubmissions)}</dd></div><div><dt><Clock size={14} aria-hidden="true" />Average solve time</dt><dd>{duration(stats.averageSolveSeconds)}</dd></div><div><dt><TrendingUp size={14} aria-hidden="true" />Fastest solve</dt><dd>{duration(stats.fastestSolveSeconds)}</dd></div></dl>
+        {stats.averageSolveSeconds === null ? <p className="profile-note">Solve times appear after your first accepted solution.</p> : null}
+      </Panel>
+    </div>
+    <Panel title="Achievement collection" eyebrow="EARNED THROUGH YOUR BATTLES" action={<span className="profile-achievement-count"><Trophy size={15} aria-hidden="true" /><strong>{earned}</strong> / {stats.achievements.length}</span>}>
+      <div className="profile-filters" role="group" aria-label="Filter achievements">{(['all', 'earned', 'locked'] as const).map(filter => <button key={filter} onClick={() => setAchievementFilter(filter)} aria-pressed={achievementFilter === filter}>{filter === 'all' ? 'All achievements' : filter === 'earned' ? `Earned (${earned})` : 'In progress'}</button>)}</div>
+      {achievements.length ? <div className="profile-achievements">{achievements.map(achievement => <article key={achievement.id} className={`profile-achievement ${achievement.unlocked ? 'is-earned' : ''}`}><div className="profile-achievement-top"><div className="profile-achievement-icon">{achievement.unlocked ? <Award size={24} aria-hidden="true" /> : <LockKeyhole size={21} aria-hidden="true" />}</div><span>{achievement.unlocked ? 'EARNED' : 'LOCKED'}</span></div><h3>{achievement.title}</h3><p>{achievement.description}</p><div className="profile-achievement-bottom">{achievement.unlocked ? <span className="profile-positive"><Check size={12} aria-hidden="true" />{achievement.unlockedAt ? `Unlocked ${date(achievement.unlockedAt)}` : 'Achievement unlocked'}</span> : <><progress max="100" value={achievement.target > 0 ? percent(achievement.progress / achievement.target * 100) : 0} aria-label={`${achievement.title}: ${achievement.progress} of ${achievement.target}`} /><span>{number(achievement.progress)} / {number(achievement.target)}</span></>}</div></article>)}</div> : <Empty icon={<Award size={24} />} text={achievementFilter === 'earned' ? 'Your first achievement is waiting. Play a battle to start making progress.' : achievementFilter === 'locked' ? 'All available achievements earned. Keep building your record.' : 'Achievements will appear here when available.'} />}
+    </Panel>
+    <div className="profile-bottom-grid">
+      <Panel title="Recent battles" eyebrow="THE STORY BEHIND THE NUMBERS" action={<Link className="profile-text-link" to="/">Play again <ArrowRight size={14} aria-hidden="true" /></Link>}>
+        {stats.recentMatches.length ? <div className="profile-battles">{stats.recentMatches.map(match => <Link key={match.id} className="profile-battle" to={`/battle/${encodeURIComponent(match.id)}`}><span className={`profile-outcome profile-outcome-${match.outcome}`}><Swords size={18} aria-hidden="true" /></span><div className="profile-battle-main"><div><strong>vs {match.opponent}</strong><span className={`profile-result-text profile-${match.outcome}`}>{match.outcome}</span></div><p>{match.problemTitles.length ? match.problemTitles.join(' · ') : match.reason.replace(/_/g, ' ').toLowerCase()}</p><time dateTime={match.endedAt ?? match.createdAt}>{date(match.endedAt ?? match.createdAt)}</time></div><span className={`profile-battle-delta ${match.ratingChange !== null && match.ratingChange > 0 ? 'profile-positive' : match.ratingChange !== null && match.ratingChange < 0 ? 'profile-negative' : ''}`}>{match.ratingChange === null ? '—' : delta(match.ratingChange)}<small>Elo</small></span><ChevronRight size={16} aria-hidden="true" /></Link>)}</div> : <Empty icon={<Swords size={26} />} title="A clean slate. A new contender." text="Your completed battles and results will appear here." battleLink />}
+      </Panel>
+      <Panel title="Topic mastery" eyebrow="BUILD YOUR RANGE">
+        {stats.topics.length ? <div className="profile-topics">{stats.topics.map(topic => <div key={topic.name}><div><strong>{topic.name}</strong><span>{topic.solved} / {topic.attempted} solved</span></div><progress max="100" value={topic.attempted ? percent(topic.solved / topic.attempted * 100) : 0} aria-label={`${topic.name}: ${topic.solved} solved out of ${topic.attempted} attempted`} /></div>)}<p className="profile-note">Based on problems attempted in your battles.</p></div> : <Empty icon={<Target size={26} />} title="Discover your strengths" text="Attempt tagged problems to see your topic breakdown." />}
+      </Panel>
+    </div>
+    <footer className="profile-footer"><Shield size={13} aria-hidden="true" />Built from your recorded battles. Every milestone earned.</footer>
+  </div></section>;
 }
 
-// Subcomponents
+function Stat({ icon, label, value, detail }: { icon: ReactNode; label: string; value: string; detail: string }) {
+  return <section className="profile-stat profile-panel"><div className="profile-stat-label"><span>{label}</span><span aria-hidden="true">{icon}</span></div><strong>{value}</strong><p>{detail}</p></section>;
+}
 
-const TopicBar = ({ label, percent, color }: { label: string, percent: number, color: string }) => (
-  <div className="flex items-center justify-between py-1">
-    <div className="w-24 text-xs font-medium text-zinc-300">{label}</div>
-    <div className="flex-1 mx-4 h-1 bg-zinc-800 rounded-full overflow-hidden">
-      <div className={`h-full ${color}`} style={{ width: `${percent}%` }} />
-    </div>
-    <div className="w-8 text-right text-xs text-zinc-400 font-medium">{percent}%</div>
-  </div>
-);
-
-const ModeBar = ({ icon, label, percent, battles, color }: { icon: string, label: string, percent: number, battles: number, color: string }) => (
-  <div className="flex items-center py-2 border-b border-zinc-800/30 last:border-0">
-    <div className="w-28 flex items-center gap-3 text-xs font-medium text-zinc-300">
-      <span className="opacity-70 text-sm">{icon}</span> {label}
-    </div>
-    <div className="flex-1 mx-4 h-1.5 bg-zinc-800 rounded-full overflow-hidden">
-      <div className={`h-full ${color}`} style={{ width: `${percent}%` }} />
-    </div>
-    <div className="w-24 text-right flex flex-col items-end">
-      <div className="text-xs text-zinc-300 font-medium">{percent}% <span className="text-zinc-600 font-normal ml-1">({battles} battles)</span></div>
-    </div>
-  </div>
-);
-
-const BattleRow = ({ result, opponent, mode, elo, details }: { result: string, opponent: string, mode: string, elo: string, details: string }) => {
-  const isWin = result === 'WIN';
-  return (
-    <div className="flex items-center justify-between p-4 bg-transparent rounded-lg hover:bg-zinc-800/20 transition-colors border-b border-zinc-800/30 last:border-0">
-      <div className="flex items-center gap-4">
-        <div className={`w-2 h-2 rounded-full ${isWin ? 'bg-green-500' : 'bg-red-500'}`} />
-        <div>
-           <div className="flex items-center gap-3 mb-1">
-             <span className="text-sm font-medium text-white">vs {opponent}</span>
-             <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase tracking-wider ${
-               mode === 'Ranked' ? 'bg-blue-500 text-white' : 
-               mode === 'Blitz' ? 'bg-orange-500 text-white' : 
-               mode === 'Blind' ? 'bg-purple-500 text-white' :
-               'bg-white text-zinc-900'
-             }`}>{mode}</span>
-           </div>
-           <div className="text-[10px] text-zinc-500">{details}</div>
-        </div>
-      </div>
-      <div className={`font-medium text-sm ${isWin && elo.startsWith('+') ? 'text-green-500' : elo.startsWith('-') ? 'text-red-500' : 'text-zinc-500'}`}>
-        {elo}
-      </div>
-    </div>
-  );
-};
-
-const RatingChart = () => {
-  const points = [
-    { month: 'Jan', value: 1200 },
-    { month: 'Feb', value: 1280 },
-    { month: 'Mar', value: 1350 },
-    { month: 'Apr', value: 1410 },
-    { month: 'May', value: 1500 },
-    { month: 'Jun', value: 1580 },
-    { month: 'Jul', value: 1650 },
-    { month: 'Aug', value: 1720 },
-    { month: 'Sep', value: 1821 },
-    { month: 'Oct', value: 1780 },
-    { month: 'Nov', value: 1724 },
-  ];
-  
-  const max = 1900;
-  const min = 1100;
-  const range = max - min;
-  
-  const chartHeight = 220;
-  const chartWidth = 800;
-  
-  const xStep = chartWidth / (points.length - 1);
-  
-  const getCoordinates = (index: number, value: number) => {
-    const x = index * xStep;
-    const y = chartHeight - ((value - min) / range) * chartHeight;
-    return `${x},${y}`;
-  };
-
-  const pathData = points.map((p, i) => getCoordinates(i, p.value)).join(' L ');
-  
-  return (
-    <div className="w-full mt-2 overflow-x-auto pb-4">
-      <div className="min-w-[600px] relative h-[250px] text-[10px] text-zinc-500">
-        {/* Y Axis Labels */}
-        <div className="absolute left-0 top-0 bottom-6 flex flex-col justify-between items-end pr-3 w-12 border-r border-zinc-800/50 font-mono">
-          {[1900, 1800, 1700, 1600, 1500, 1400, 1300, 1200, 1100].map(v => (
-            <span key={v}>{v.toLocaleString()}</span>
-          ))}
-        </div>
-        
-        <div className="absolute left-14 right-0 top-0 bottom-6">
-           {/* Grid lines */}
-           {[...Array(9)].map((_, i) => (
-             <div key={i} className="absolute w-full border-t border-zinc-800/30" style={{ top: `${(i/8)*100}%` }} />
-           ))}
-           
-           {/* SVG Chart */}
-           <svg className="w-full h-full overflow-visible" viewBox={`0 0 ${chartWidth} ${chartHeight}`} preserveAspectRatio="none">
-             <path d={`M ${pathData}`} fill="none" stroke="#3b82f6" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-             {points.map((p, i) => {
-               const [x, y] = getCoordinates(i, p.value).split(',');
-               let color = "#3b82f6";
-               if (i === 8) color = "#22c55e"; // peak
-               if (i === 10) color = "#ef4444"; // current drop
-               return (
-                 <circle key={i} cx={x} cy={y} r="4.5" fill={color} stroke="#1C1C1E" strokeWidth="2" className="shadow-lg" />
-               );
-             })}
-           </svg>
-        </div>
-        
-        {/* X Axis Labels */}
-        <div className="absolute left-14 right-0 bottom-0 h-6 flex justify-between items-end px-1 font-mono">
-           {points.map(p => (
-             <span key={p.month} className="transform -translate-x-1/2">{p.month}</span>
-           ))}
-        </div>
-      </div>
-    </div>
-  );
-};
+function Empty({ icon, title, text, battleLink = false }: { icon: ReactNode; title?: string; text: string; battleLink?: boolean }) {
+  return <div className="profile-empty"><span aria-hidden="true">{icon}</span>{title ? <h3>{title}</h3> : null}<p>{text}</p>{battleLink ? <Link to="/">Find a battle <ArrowRight size={14} aria-hidden="true" /></Link> : null}</div>;
+}

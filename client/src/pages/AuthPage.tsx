@@ -1,6 +1,8 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Zap, Mail, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react';
+import { apiUrl } from '../utils/api';
+import { useSocketStore } from '../stores/useSocketStore';
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
@@ -27,7 +29,7 @@ export default function AuthPage() {
     const payload = isLogin ? { email, password } : { username, email, password };
 
     try {
-      const response = await fetch(`http://localhost:5000${endpoint}`, {
+      const response = await fetch(apiUrl(endpoint), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -40,9 +42,11 @@ export default function AuthPage() {
 
       localStorage.setItem('token', data.token);
       localStorage.setItem('user', JSON.stringify(data.user));
+      useSocketStore.getState().disconnect();
+      useSocketStore.getState().connect();
       navigate('/profile');
-    } catch (err: any) {
-      setError(err.message);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Authentication failed');
     } finally {
       setIsLoading(false);
     }

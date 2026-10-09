@@ -1,479 +1,273 @@
-import { useEffect, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import Editor from '@monaco-editor/react';
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { Link, Navigate, useParams } from 'react-router-dom';
+import { Clock, Play, Send, Swords, Terminal, Check, ArrowLeft, Code2, ShieldCheck, ChevronRight } from 'lucide-react';
+import BattleResult from '../components/BattleResult';
 import { useSocketStore } from '../stores/useSocketStore';
-import { Play, Square, Settings, Layout, Code2, Terminal, Users, CheckCircle2, ChevronRight, X, Maximize2, Minimize2, Trophy, Clock, Skull, Zap, LogOut, Send, ChevronLeft, Swords, Eye } from 'lucide-react';
-import { PostMatchDebrief } from '../components/PostMatchDebrief';
+import { apiUrl } from '../utils/api';
+import { readSessionUser } from '../utils/session';
+import type { SessionUser } from '../utils/session';
+import type { BattleLanguage, BattleState, MatchOverPayload, SubmissionDetail, SubmissionSummary } from '../socket/events';
+import './LiveBattlePage.css';
+const Editor = lazy(() => import('../components/LocalCodeEditor'));
+
+const languages: { key: BattleLanguage; label: string; monaco: string; filename: string }[] = [
+  { key: 'javascript', label: 'JavaScript', monaco: 'javascript', filename: 'solution.js' },
+  { key: 'python', label: 'Python 3', monaco: 'python', filename: 'solution.py' },
+  { key: 'cpp', label: 'C++', monaco: 'cpp', filename: 'solution.cpp' },
+  { key: 'java', label: 'Java', monaco: 'java', filename: 'Main.java' },
+];
+function formatDuration(seconds: number | null) {
+  if (seconds === null) return '—';
+  const value = Math.max(0, Math.floor(seconds));
+  return `${Math.floor(value / 60).toString().padStart(2, '0')}:${(value % 60).toString().padStart(2, '0')}`;
+}
+function label(value: string) { return value.replaceAll('_', ' ').toLowerCase(); }
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = localStorage.getItem('token');
+  if (!token) throw new Error('Your session has ended. Sign in again to continue.');
+  const response = await fetch(apiUrl(path), { ...options, headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}`, ...options.headers } });
+  const body = await response.json();
+  if (!response.ok) {
+    const message = typeof body.error === 'string' ? body.error : body.error?.message;
+    throw new Error(message || (response.status === 401 ? 'Your session has expired. Sign in again.' : `Request failed (${response.status}).`));
+  }
+  return body as T;
+}
+function readDrafts(key: string): Record<string, string> {
+  try {
+    const stored: unknown = JSON.parse(sessionStorage.getItem(key) || '{}');
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      return Object.fromEntries(Object.entries(stored).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+    }
+  } catch { /* The editor works when storage is unavailable. */ }
+  return {};
+}
+
+function SubmissionOutput({ submission, detail }: { submission: SubmissionSummary; detail?: SubmissionDetail }) {
+  const finished = submission.state === 'FINISHED';
+  return <div className="battle-output-content">
+    <div className="battle-output-summary"><span className={`battle-verdict ${submission.verdict === 'ACCEPTED' ? 'battle-positive' : finished ? 'battle-negative' : ''}`}>{label(submission.verdict || submission.state)}</span>
+      <span>{submission.mode === 'RUN' ? 'Examples' : 'Full test suite'} · {finished ? `${submission.passed}/${submission.total} passed` : 'Judging on the server…'}</span></div>
+    <p className="battle-muted">{submission.mode === 'RUN' ? 'Running examples does not change battle progress.' : 'Hidden test inputs and execution output stay private.'}</p>
+    {submission.time != null || submission.memory != null ? <div className="battle-metrics">
+      {submission.time != null ? <span>Execution: {submission.time}s</span> : null}
+      {submission.memory != null ? <span>Memory: {(submission.memory / 1024).toFixed(1)} MiB</span> : null}
+    </div> : null}
+    {!detail ? <p className="battle-muted">Loading submission details…</p> : null}
+    {detail?.compileOutput ? <div className="battle-diagnostic"><h3>Compiler output</h3><pre>{detail.compileOutput}</pre></div> : null}
+    {detail?.examples?.map((example, index) => <details className="battle-example-result" key={index} open={example.verdict !== 'ACCEPTED'}>
+      <summary>Example {index + 1} · {label(example.verdict)}</summary><h3>Output</h3><pre>{example.stdout || '(no output)'}</pre>
+      {example.stderr ? <><h3>Diagnostics</h3><pre>{example.stderr}</pre></> : null}</details>)}
+    {detail?.integrity ? <IntegrityAdvisory integrity={detail.integrity} /> : null}
+  </div>;
+}
+
+function IntegrityAdvisory({ integrity }: { integrity: Record<string, unknown> }) {
+  const similarity = integrity.similarity as { maxScore?: number | null } | undefined;
+  const score = typeof similarity?.maxScore === 'number' ? Math.round(similarity.maxScore * 100) : null;
+  const signals = Array.isArray(integrity.signals) ? integrity.signals.filter((s): s is string => typeof s === 'string') : [];
+  return <details className="battle-integrity"><summary>Submission integrity advisory</summary>
+    <h3>{integrity.state === 'review_suggested' ? 'Similarity deserves a closer look' : integrity.state === 'no_similarity_found' ? 'No high similarity found' : 'Not enough evidence to assess similarity'}</h3>
+    {score !== null ? <p>Local code similarity: {score}% overlap with an eligible comparison submission.</p> : null}
+    <p>AI authorship: not assessed. Code alone cannot prove whether AI was used.</p>
+    {signals.map(signal => <p className="battle-muted" key={signal}>{signal}</p>)}
+    <p className="battle-muted">Only you can see this advisory. It does not change your battle result or Elo.</p>
+  </details>;
+}
+
+function BattleWorkspace({ roomId, user }: { roomId: string; user: SessionUser }) {
+  const socket = useSocketStore(state => state.socket);
+  const isConnected = useSocketStore(state => state.isConnected);
+  const connect = useSocketStore(state => state.connect);
+  const [match, setMatch] = useState<BattleState | null>(null);
+  const [result, setResult] = useState<MatchOverPayload | null>(null);
+  const [error, setError] = useState('');
+  const [requestError, setRequestError] = useState('');
+  const [storageError, setStorageError] = useState('');
+  const [cancelledReason, setCancelledReason] = useState('');
+  const [language, setLanguage] = useState<BattleLanguage>('javascript');
+  const [problemId, setProblemId] = useState('');
+  const [now, setNow] = useState(Date.now);
+  const [sending, setSending] = useState<'RUN' | 'SUBMIT' | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [localSubmissions, setLocalSubmissions] = useState<Record<string, SubmissionSummary>>({});
+  const [details, setDetails] = useState<Record<string, SubmissionDetail>>({});
+  const [detailError, setDetailError] = useState('');
+  const [forfeitPending, setForfeitPending] = useState(false);
+  const [reviewCode, setReviewCode] = useState(false);
+  const storageKey = `codeclash:drafts:v1:${user.id}:${roomId}`;
+  const [drafts, setDrafts] = useState(() => readDrafts(storageKey));
+  const actionLock = useRef(false);
+  const pendingRequest = useRef<{ fingerprint: string; id: string } | null>(null);
+  const forfeitTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => { connect(); }, [connect]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => { window.clearInterval(timer); window.clearTimeout(forfeitTimer.current); };
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let busy = false;
+    let finished = false;
+    async function refresh() {
+      if (busy || controller.signal.aborted) return;
+      busy = true;
+      try {
+        const snapshot = await request<BattleState>(`/api/matches/${encodeURIComponent(roomId)}`, { signal: controller.signal });
+        if (controller.signal.aborted) return;
+        setMatch(snapshot); setError('');
+        if (snapshot.result) setResult(snapshot.result);
+        finished = snapshot.status === 'COMPLETED' || snapshot.status === 'CANCELLED';
+      } catch (failure) {
+        if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : 'Could not load battle.');
+      } finally { busy = false; }
+    }
+    async function poll() {
+      await refresh();
+      if (!controller.signal.aborted && !finished) timer = window.setTimeout(() => void poll(), 2000);
+    }
+    const refreshEvent = () => { void refresh(); };
+    const onSnapshot = (snapshot: BattleState) => { if (snapshot.roomId === roomId) refreshEvent(); };
+    const onResult = (payload: MatchOverPayload) => { if (payload.matchId === roomId) { setResult(payload); refreshEvent(); } };
+    const onCancelled = (payload: { roomId: string; reason: string }) => { if (payload.roomId === roomId) { setCancelledReason(payload.reason); refreshEvent(); } };
+    const onError = (payload: { message: string }) => setRequestError(payload.message);
+    const onConnect = () => { socket?.emit('join_battle', { roomId }); refreshEvent(); };
+    socket?.on('connect', onConnect); socket?.on('match_found', onSnapshot); socket?.on('battle_sync', onSnapshot);
+    socket?.on('battle_progress', refreshEvent); socket?.on('submission_updated', refreshEvent);
+    socket?.on('match_over', onResult); socket?.on('match_cancelled', onCancelled); socket?.on('server_error', onError);
+    if (socket?.connected) socket.emit('join_battle', { roomId });
+    void poll();
+    return () => {
+      controller.abort(); window.clearTimeout(timer);
+      socket?.off('connect', onConnect); socket?.off('match_found', onSnapshot); socket?.off('battle_sync', onSnapshot);
+      socket?.off('battle_progress', refreshEvent); socket?.off('submission_updated', refreshEvent);
+      socket?.off('match_over', onResult); socket?.off('match_cancelled', onCancelled); socket?.off('server_error', onError);
+    };
+  }, [roomId, socket]);
+
+  const submissionMap = new Map<string, SubmissionSummary>();
+  for (const item of match?.submissions ?? []) submissionMap.set(item.id, item);
+  for (const item of Object.values(localSubmissions)) if (!submissionMap.has(item.id)) submissionMap.set(item.id, item);
+  for (const item of Object.values(details)) submissionMap.set(item.id, item);
+  const submissions = Array.from(submissionMap.values()).sort((a, b) => Date.parse(b.receivedAt) - Date.parse(a.receivedAt));
+  const selected = submissions.find(item => item.id === selectedId) ?? submissions[0];
+  const pendingIds = submissions.filter(item => item.state !== 'FINISHED').map(item => item.id).sort().join(',');
+  const detailId = selected?.id;
+  const hasDetail = !!(detailId && details[detailId]);
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const ids = new Set(pendingIds ? pendingIds.split(',') : []);
+    if (detailId && !hasDetail) ids.add(detailId);
+    async function poll() {
+      await Promise.all(Array.from(ids).map(async id => {
+        try {
+          const detail = await request<SubmissionDetail>(`/api/submissions/${encodeURIComponent(id)}`, { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          setDetails(previous => ({ ...previous, [id]: detail })); setDetailError('');
+          if (detail.state === 'FINISHED') ids.delete(id);
+        } catch (failure) {
+          if (!controller.signal.aborted) setDetailError(failure instanceof Error ? failure.message : 'Could not load submission.');
+        }
+      }));
+      if (!controller.signal.aborted && ids.size) timer = window.setTimeout(() => void poll(), 1000);
+    }
+    if (ids.size) void poll();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [pendingIds, detailId, hasDetail]);
+
+  const problem = match?.problems.find(item => item.id === problemId) ?? match?.problems[0];
+  const draftKey = `${problem?.id ?? ''}:${language}`;
+  const sourceCode = drafts[draftKey] ?? problem?.starters[language] ?? '';
+  const languageInfo = languages.find(item => item.key === language)!;
+  const mine = match?.progress[user.id];
+  const opponentEntry = Object.entries(match?.players ?? {}).find(([id]) => id !== user.id);
+  const opponentSolved = opponentEntry ? match?.progress[opponentEntry[0]]?.solved ?? 0 : 0;
+  const secondsLeft = match ? Math.max(0, (match.endTime - now) / 1000) : null;
+  const ended = !!result || !!cancelledReason || match?.status === 'COMPLETED' || match?.status === 'CANCELLED';
+  const canSubmit = !!problem && match?.status === 'IN_PROGRESS' && !ended && (secondsLeft ?? 0) > 0;
+  const hasPending = !!pendingIds || !!sending;
+  function updateDraft(value: string | undefined) {
+    const updated = { ...drafts, [draftKey]: value ?? '' };
+    setDrafts(updated);
+    try { sessionStorage.setItem(storageKey, JSON.stringify(updated)); }
+    catch { setStorageError('Draft storage is unavailable. Keep a copy of your code before reloading.'); }
+  }
+
+  async function send(mode: 'RUN' | 'SUBMIT') {
+    if (!problem || !canSubmit || hasPending || actionLock.current) return;
+    if (!sourceCode.trim()) { setRequestError('Write a solution before running or submitting.'); return; }
+    actionLock.current = true; setSending(mode); setRequestError('');
+    const fingerprint = JSON.stringify({ problemId: problem.id, language, sourceCode, mode });
+    const requestId = pendingRequest.current?.fingerprint === fingerprint ? pendingRequest.current.id : crypto.randomUUID();
+    pendingRequest.current = { fingerprint, id: requestId };
+    try {
+      const response = await request<{ id: string; state: SubmissionSummary['state'] }>(`/api/matches/${encodeURIComponent(roomId)}/${mode === 'RUN' ? 'runs' : 'submissions'}`, {
+        method: 'POST', body: JSON.stringify({ problemId: problem.id, language, sourceCode, requestId }),
+      });
+      pendingRequest.current = null;
+      setLocalSubmissions(previous => ({ ...previous, [response.id]: {
+        id: response.id, problemId: problem.id, mode, state: response.state, verdict: null,
+        passed: 0, total: mode === 'RUN' ? problem.examples.length : problem.totalTestCases,
+        time: null, memory: null, receivedAt: new Date().toISOString(), finishedAt: null,
+      } }));
+      setSelectedId(response.id);
+    } catch (failure) { setRequestError(failure instanceof Error ? failure.message : 'Submission could not be sent. Try again.'); }
+    finally { actionLock.current = false; setSending(null); }
+  }
+  function forfeit() {
+    if (!socket?.connected || ended || forfeitPending) return;
+    if (!window.confirm('Forfeit this battle? Your opponent will win and your rating will be updated.')) return;
+    setForfeitPending(true); socket.emit('forfeit_match', { roomId });
+    forfeitTimer.current = window.setTimeout(() => setForfeitPending(false), 5000);
+  }
+
+  return <main className={`live-battle${ended ? ' live-battle--ended' : ''}`}>
+    <header className="battle-header">
+      <Link to="/" className="battle-brand" aria-label="Code Clash lobby"><Swords size={21} /><span>CODE<span>CLASH</span></span></Link>
+      <div className="battle-header-center">
+        <div className="battle-player"><strong>{match?.players[user.id]?.username ?? user.username}</strong><span>{mine?.solved ?? 0}/{match?.problems.length ?? 2} solved</span></div>
+        <div className={`battle-clock ${!ended && (secondsLeft ?? 999) < 60 ? 'battle-clock--urgent' : ''}`} aria-label={ended ? 'Battle finished' : 'Time remaining'}><Clock size={16} /><time>{ended ? 'Finished' : formatDuration(secondsLeft)}</time></div>
+        <div className="battle-player battle-player--opponent"><strong>{opponentEntry?.[1].username ?? 'Opponent'}</strong><span>{opponentSolved}/{match?.problems.length ?? 2} solved</span></div>
+      </div>
+      {ended ? <Link className="battle-button" to="/profile">My profile</Link> : <button className="battle-button battle-forfeit" disabled={!isConnected || forfeitPending} onClick={forfeit}>{forfeitPending ? 'Forfeiting…' : 'Forfeit'}</button>}
+    </header>
+    <div className="battle-statusline"><span><i className={isConnected ? 'battle-dot battle-dot--online' : 'battle-dot'} />{ended ? 'Result saved' : isConnected ? 'Live connection' : 'Reconnecting · HTTP updates remain active'}</span><span><ShieldCheck size={12} /> Ranked arena · {roomId.slice(0, 8)}</span></div>
+    {error ? <div className="battle-alert" role="alert">{error} <Link to="/login">Sign in</Link> · <Link to="/">Lobby</Link></div> : null}
+    {requestError ? <div className="battle-alert" role="alert">{requestError}<button aria-label="Dismiss error" onClick={() => setRequestError('')}>×</button></div> : null}
+    {storageError ? <div className="battle-alert" role="status">{storageError}</div> : null}
+    {match?.status === 'DRAINING' || (!ended && match && secondsLeft === 0) ? <div className="battle-notice" role="status">Time is up. The server is finishing eligible submissions before resolving the battle.</div> : null}
+    {result && match ? !reviewCode ? <BattleResult result={result} match={match} userId={user.id} onReview={() => { setReviewCode(true); if (selected) { setProblemId(selected.problemId); const detail = details[selected.id]; if (detail) setLanguage(detail.language); } }} /> : null : cancelledReason || match?.status === 'CANCELLED' ? <section className="battle-result"><h1>Battle cancelled</h1><p>{label(cancelledReason || 'The battle could not be completed.')}</p><p>No rating change.</p><Link to="/" className="battle-button">Return to lobby</Link></section> : null}
+    {ended && reviewCode ? <div className="battle-reviewbar"><div><Code2 size={20} /><div><strong>Your saved solution</strong><span>Review your code, test results, and submission history.</span></div></div><button className="battle-button" onClick={() => setReviewCode(false)}><ArrowLeft size={14} />Back to result</button></div> : null}
+    {!ended && match ? <div className="battle-roundbar"><div><span className="battle-eyebrow">THE CHALLENGE</span><strong>Two problems. One winner.</strong><p>Solve both first, or finish with more solves when the clock expires.</p></div><div className="battle-round-progress" aria-label="Your solved problems">{match.problems.map((p, i) => <span key={p.id} className={mine?.problemIds.includes(p.id) ? 'is-solved' : ''}>{mine?.problemIds.includes(p.id) ? <Check size={13} /> : `0${i + 1}`} {p.title}</span>)}</div></div> : null}
+    {!match ? <div className="battle-loading" role="status"><Swords size={32} /><h1>Loading battle</h1><p>Retrieving your problem set and saved progress…</p></div> : !ended || reviewCode ? <div className="battle-workspace" id="battle-workspace">
+      <section className="battle-problem-panel" aria-label="Problem statement">
+        <nav className="battle-problem-tabs" aria-label="Battle problems">{match.problems.map((item, index) => <button key={item.id} aria-pressed={problem?.id === item.id} className={problem?.id === item.id ? 'is-active' : ''} onClick={() => { setProblemId(item.id); if (ended) { const saved = submissions.find(s => s.problemId === item.id); if (saved) setSelectedId(saved.id); } }}>{mine?.problemIds.includes(item.id) ? <Check size={14} /> : <span>{index + 1}</span>}{item.title}</button>)}</nav>
+        {problem ? <div className="battle-statement"><div className="battle-statement-heading"><span>PROBLEM {String(match.problems.findIndex(p => p.id === problem.id) + 1).padStart(2, '0')}</span><span className={`battle-difficulty battle-difficulty--${problem.difficulty.toLowerCase()}`}>{problem.difficulty}</span></div><h1>{problem.title}</h1><div className="battle-topic"><span>{problem.topic}</span><span>{problem.totalTestCases} judge tests</span></div><p className="battle-description">{problem.description}</p>
+          <div className="battle-contract"><strong>Program contract</strong><p>Write a complete program that reads standard input and prints the required answer to standard output. Each test runs separately.</p><p>Run checks visible examples. Submit checks the full suite of {problem.totalTestCases} tests.</p></div>
+          <h2>Examples</h2>{problem.examples.map((example, index) => <article className="battle-example" key={index}><h3>Example {index + 1}</h3><div><span>Input</span><pre>{example.stdin || '(empty input)'}</pre></div><div><span>Expected output</span><pre>{example.stdout || '(empty output)'}</pre></div></article>)}
+        </div> : <p className="battle-muted">No assigned problems are available.</p>}
+      </section>
+      <section className="battle-editor-panel" aria-label="Solution editor">
+        <div className="battle-editor-toolbar"><span className="battle-filename"><Code2 size={15} />{languageInfo.filename}<span>{ended ? 'READ ONLY' : 'YOUR SOLUTION'}</span></span><label className="battle-language-label">Language<select value={language} onChange={event => setLanguage(event.target.value as BattleLanguage)}>{languages.filter(item => problem?.starters[item.key] !== undefined).map(item => <option key={item.key} value={item.key}>{item.label}</option>)}</select></label></div>
+        <div className="battle-editor"><Suspense fallback={<p className="battle-loading-editor">Loading editor…</p>}><Editor key={draftKey} path={`${user.id}/${roomId}/${problem?.id}/${languageInfo.filename}`} height="100%" theme="codeclash-arena" language={languageInfo.monaco} value={ended && selected?.problemId === problem?.id && details[selected.id]?.language === language ? details[selected.id].sourceCode : sourceCode} onChange={updateDraft} loading={<p className="battle-loading-editor">Loading editor…</p>} options={{ ariaLabel: `${problem?.title ?? 'Problem'} solution in ${languageInfo.label}`, minimap: { enabled: false }, fontSize: 13, lineHeight: 22, fontFamily: "'JetBrains Mono', monospace", scrollBeyondLastLine: false, automaticLayout: true, padding: { top: 16 }, tabSize: 4, readOnly: ended }} /></Suspense></div>
+        <div className="battle-actions"><span><ShieldCheck size={13} />{sending ? 'Sending code…' : hasPending ? 'Judging submission…' : ended ? 'Saved submission · Read only' : 'Draft saved · Server judging'}</span>{!ended ? <><button className="battle-button" disabled={!canSubmit || hasPending} onClick={() => void send('RUN')}><Play size={15} />{sending === 'RUN' ? 'Sending…' : 'Run examples'}</button><button className="battle-button battle-button--primary" disabled={!canSubmit || hasPending} onClick={() => void send('SUBMIT')}><Send size={15} />{sending === 'SUBMIT' ? 'Sending…' : 'Submit solution'}<ChevronRight size={14} /></button></> : <span className="battle-review-hint">Choose a submission below to inspect its results.</span>}</div>
+        <section className="battle-console" aria-label="Submission results"><div className="battle-console-header"><h2><Terminal size={15} />Results</h2><label>Submission<select value={selected?.id ?? ''} onChange={event => setSelectedId(event.target.value)} disabled={!submissions.length}><option value="" disabled>No submissions yet</option>{submissions.map(item => <option key={item.id} value={item.id}>{new Date(item.receivedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · {match.problems.find(p => p.id === item.problemId)?.title ?? 'Problem'} · {item.mode === 'RUN' ? 'Run' : 'Submit'} · {label(item.verdict || item.state)}</option>)}</select></label></div>
+          {detailError ? <p className="battle-alert" role="alert">{detailError}</p> : null}
+          {selected ? <SubmissionOutput submission={selected} detail={details[selected.id]} /> : <div className="battle-console-empty"><Terminal size={24} /><p>Run the examples to check your program.</p><span>Submit when you are ready for the hidden tests.</span></div>}
+        </section>
+      </section>
+    </div> : null}
+    {ended ? <footer className="battle-footer"><Link to="/"><ArrowLeft size={14} />Return to lobby</Link><Link to="/standing">Account standing & appeals</Link></footer> : null}
+  </main>;
+}
 
 export const LiveBattlePage = () => {
   const { roomId } = useParams();
-  const navigate = useNavigate();
-  const { socket, connect } = useSocketStore();
-  const [language, setLanguage] = useState('javascript');
-  const [matchData, setMatchData] = useState<any>(null);
-  const [currentProblemIndex, setCurrentProblemIndex] = useState(0);
-  const [opponentProgress, setOpponentProgress] = useState('0/0');
-  const [timeLeft, setTimeLeft] = useState('00:00');
-  const [code, setCode] = useState('// Write your solution here...\n');
-  const [consoleOutput, setConsoleOutput] = useState<string[]>([]);
-  const [runHover, setRunHover] = useState(false);
-  const [submitHover, setSubmitHover] = useState(false);
-  const [leaveHover, setLeaveHover] = useState(false);
-  const [currentUser, setCurrentUser] = useState<any>(null);
-  const [isTieBreaker, setIsTieBreaker] = useState(false);
-  const [matchEnded, setMatchEnded] = useState(false);
-  const [matchResult, setMatchResult] = useState('');
-  const [matchRatingChange, setMatchRatingChange] = useState(0);
-
-  useEffect(() => {
-    const userStr = localStorage.getItem('user');
-    if (userStr) setCurrentUser(JSON.parse(userStr));
-  }, []);
-
-  useEffect(() => { if (!socket) connect(); }, [socket, connect]);
-
-  useEffect(() => {
-    if (!socket) return;
-    const handleMatchFound = (payload: any) => setMatchData(prev => ({ ...prev, ...payload }));
-    const handleBattleSync = (payload: any) => setMatchData(prev => ({ ...prev, ...payload }));
-    const handleOpponentUpdate = ({ passedCases, totalCases }: any) => setOpponentProgress(`${passedCases}/${totalCases}`);
-    const handleMatchOver = ({ winner, loser, reason, ratingChange }: any) => {
-      setMatchEnded(true);
-      if (winner === currentUser?.username) {
-        setMatchResult(`VICTORY (${reason === 'forfeit' ? 'Opponent Forfeited' : 'You Won'})`);
-        setMatchRatingChange(ratingChange || 0);
-      } else {
-        setMatchResult('DEFEAT');
-        setMatchRatingChange(-(ratingChange || 0));
-      }
-    };
-    socket.on('match_found', handleMatchFound);
-    socket.on('battle_sync', handleBattleSync);
-    socket.on('opponent_test_update', handleOpponentUpdate);
-    socket.on('match_over', handleMatchOver);
-    if (roomId) socket.emit('join_battle', { roomId });
-    return () => { 
-      socket.off('match_found', handleMatchFound); 
-      socket.off('battle_sync', handleBattleSync); 
-      socket.off('opponent_test_update', handleOpponentUpdate); 
-      socket.off('match_over', handleMatchOver);
-    };
-  }, [socket, roomId, currentUser?.username]);
-
-  useEffect(() => {
-    if (matchData?.phase === 'boss') {
-      setIsTieBreaker(true);
-    }
-  }, [matchData?.phase]);
-
-  useEffect(() => {
-    if (!matchData?.endTime) return;
-    const interval = setInterval(() => {
-      const remaining = Math.max(0, Math.floor((matchData.endTime - Date.now()) / 1000));
-      if (remaining <= 0) { setTimeLeft('00:00'); clearInterval(interval); return; }
-      const m = Math.floor(remaining / 60);
-      const s = remaining % 60;
-      setTimeLeft(`${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [matchData?.endTime]);
-
-  const handleRunCode = () => {
-    if (!socket || !roomId) return;
-    const p = matchData?.problems[currentProblemIndex];
-    if (!p) return;
-    const total = p.totalTestCases;
-    const passed = Math.floor(Math.random() * (total + 1));
-    socket.emit('test_case_update', { roomId, passedCases: passed, totalCases: total });
-    setConsoleOutput(prev => [...prev, `> Running ${p.title}...`, `  Result: ${passed}/${total} test cases passed.`, '']);
-  };
-
-  let opponentName = 'Opponent';
-  let opponentRating = 1200;
-  let myRating = 1200;
-
-  if (matchData?.players) {
-    const pKeys = Object.keys(matchData.players);
-    const oppKey = pKeys.find(k => k !== socket?.id && matchData.players[k].username !== currentUser?.username);
-    if (oppKey) {
-      opponentName = matchData.players[oppKey].username;
-      opponentRating = matchData.players[oppKey].rating;
-    } else {
-      const fallback = pKeys.find(k => k !== socket?.id);
-      if (fallback) {
-        opponentName = matchData.players[fallback].username;
-        opponentRating = matchData.players[fallback].rating;
-      }
-    }
-    
-    const myKey = pKeys.find(k => k === socket?.id || matchData.players[k].username === currentUser?.username);
-    if (myKey) {
-      myRating = matchData.players[myKey].rating;
-    }
-  }
-  const myUsername = currentUser?.username || 'You';
-  const players = [`${myUsername} (${myRating})`, `${opponentName} (${opponentRating})`];
-
-  const pList = matchData?.problems || [];
-  const totalProblems = isTieBreaker ? 1 : 2;
-  const activeProblem = isTieBreaker 
-    ? (pList[2] || pList[0] || { title: 'Boss Problem Loading...', description: '', totalTestCases: 0 }) 
-    : (pList[currentProblemIndex] || { title: 'Loading...', description: 'Waiting for match data...', totalTestCases: 0 });
-
-  // Shared input styles
-  const s = {
-    panelBg: '#0a0c10',
-    headerBg: 'rgba(12, 14, 20, 0.95)',
-    border: 'rgba(255,255,255,0.05)',
-    borderBright: 'rgba(255,255,255,0.08)',
-  };
-
-  return (
-    <div style={{ width: '100%', height: '100vh', background: '#06070a', display: 'flex', flexDirection: 'column', overflow: 'hidden', fontFamily: "'Inter', sans-serif" }}>
-
-      {matchEnded && (
-        <PostMatchDebrief
-          isWin={matchResult.startsWith('VICTORY')}
-          opponentName={opponentName}
-          totalTimeStr="42m 15s"
-          oldRating={myRating}
-          ratingChange={matchRatingChange}
-          scenarioTitle={matchResult.startsWith('VICTORY') ? "Opponent successfully defeated in standard phase." : "Defeated in standard phase."}
-          isTiebreakerScenario={isTieBreaker}
-          myTotalScore={matchResult.startsWith('VICTORY') ? 370 : 150}
-          opponentTotalScore={matchResult.startsWith('VICTORY') ? 150 : 370}
-          problems={[
-            {
-              title: pList[0]?.title || 'Two Sum',
-              difficulty: 'EASY',
-              timeStr: '12m 30s',
-              status: matchResult.startsWith('VICTORY') ? 'SOLVED' : 'FAILED',
-              score: { total: 120, baseScore: 100, speedBonus: 20, penalty: 0, partialCredit: 0 }
-            },
-            {
-              title: pList[1]?.title || 'Valid Parentheses',
-              difficulty: 'MEDIUM',
-              timeStr: '29m 45s',
-              status: 'SOLVED',
-              score: { total: 100, baseScore: 100, speedBonus: 0, penalty: 0, partialCredit: 0 }
-            }
-          ]}
-          reachedBoss={isTieBreaker}
-          myComplexity="O(n)"
-          myComplexityLabel="Optimal"
-          opponentComplexity="O(n^2)"
-          aiDebriefPoints={[
-            "Identified optimal approach for P1 quickly.",
-            "Struggled slightly with edge cases on P2, resulting in minor time loss.",
-            "Recommended focus: Dynamic Programming patterns."
-          ]}
-          onClose={() => navigate('/')}
-        />
-      )}
-
-      {/* ══ TOP BAR ══ */}
-      <header style={{
-        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-        height: '56px', padding: '0 20px', flexShrink: 0,
-        background: s.headerBg, borderBottom: `1px solid ${s.border}`,
-        backdropFilter: 'blur(12px)',
-      }}>
-        {/* Left: Brand + Room */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }} onClick={() => navigate('/')}>
-            <div style={{
-              width: '30px', height: '30px', borderRadius: '9px',
-              background: 'linear-gradient(135deg, #00e5ff, #7c3aed)',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 0 16px rgba(0,229,255,0.15)',
-            }}>
-              <Zap size={13} color="#fff" strokeWidth={2.5} />
-            </div>
-            <span style={{ fontSize: '14px', fontWeight: 800, color: '#fff', fontFamily: "'Space Grotesk', sans-serif", letterSpacing: '-0.02em' }}>
-              CODE<span style={{ color: '#00e5ff' }}>CLASH</span>
-            </span>
-          </div>
-          <div style={{ width: '1px', height: '20px', background: 'rgba(255,255,255,0.08)' }} />
-          <div style={{
-            fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#454760',
-            background: 'rgba(255,255,255,0.03)', padding: '4px 10px', borderRadius: '6px',
-            border: '1px solid rgba(255,255,255,0.05)',
-          }}>
-            {roomId?.substring(0, 8)}
-          </div>
-        </div>
-
-        {/* Center: Players + Timer */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '20px' }}>
-          <span style={{ fontSize: '12px', fontWeight: 700, color: '#00e5ff', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: "'Space Grotesk', sans-serif" }}>{players[0]}</span>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '6px 16px', borderRadius: '10px',
-            background: 'linear-gradient(135deg, rgba(0,229,255,0.06), rgba(124,58,237,0.06))',
-            border: '1px solid rgba(0,229,255,0.12)',
-          }}>
-            <Clock size={13} color="#7a7e9a" />
-            <span style={{
-              fontSize: '20px', fontWeight: 800, fontFamily: "'JetBrains Mono', monospace",
-              color: '#fff', letterSpacing: '0.05em',
-              textShadow: '0 0 12px rgba(0,229,255,0.3)',
-            }}>{timeLeft}</span>
-            <button onClick={() => {
-              if (!isTieBreaker) {
-                const isTie = window.confirm("Simulate a tie? (OK = Tie -> Boss round, Cancel = Regular Result)");
-                if (isTie) {
-                  socket?.emit('trigger_tiebreaker', { roomId });
-                } else {
-                  setMatchEnded(true);
-                  setMatchResult('VICTORY (Test)');
-                }
-              } else {
-                  setMatchEnded(true);
-                  setMatchResult('VICTORY (Boss Defeated)');
-              }
-            }} style={{ padding: '4px 8px', fontSize: '10px', background: '#f87171', color: 'white', borderRadius: '4px', border: 'none', cursor: 'pointer', fontWeight: 600, marginLeft: '8px' }}>End (Test)</button>
-          </div>
-          <span style={{ fontSize: '12px', fontWeight: 700, color: '#7c3aed', textTransform: 'uppercase', letterSpacing: '0.08em', fontFamily: "'Space Grotesk', sans-serif" }}>{players[1]}</span>
-        </div>
-
-        {/* Right: Opponent + Leave */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: '8px',
-            padding: '6px 14px', borderRadius: '8px', fontSize: '12px',
-            background: 'rgba(248,113,113,0.05)', border: '1px solid rgba(248,113,113,0.12)', color: '#7a7e9a',
-          }}>
-            <Swords size={13} color="#f87171" />
-            <span>Opponent:</span>
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, color: '#f87171' }}>{opponentProgress}</span>
-          </div>
-          <button
-            onClick={() => {
-              socket?.emit('forfeit_match', { roomId });
-              navigate('/');
-            }}
-            onMouseEnter={() => setLeaveHover(true)}
-            onMouseLeave={() => setLeaveHover(false)}
-            style={{
-              display: 'flex', alignItems: 'center', gap: '6px',
-              padding: '7px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
-              background: leaveHover ? 'rgba(248,113,113,0.15)' : 'rgba(248,113,113,0.06)',
-              border: leaveHover ? '1px solid rgba(248,113,113,0.35)' : '1px solid rgba(248,113,113,0.12)',
-              color: '#f87171', cursor: 'pointer', transition: 'all 0.2s ease',
-            }}
-          >
-            <LogOut size={13} /> Leave
-          </button>
-        </div>
-      </header>
-
-      {/* ══ MAIN WORKSPACE ══ */}
-      <main style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-
-        {/* ── LEFT: Problem Panel (38%) ── */}
-        <div style={{
-          width: '38%', display: 'flex', flexDirection: 'column',
-          background: s.panelBg, borderRight: `1px solid ${s.border}`,
-        }}>
-          {/* Problem Header */}
-          <div style={{
-            padding: '20px 24px 16px', borderBottom: `1px solid ${s.border}`,
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <h1 style={{ fontSize: '20px', fontWeight: 700, color: '#fff', fontFamily: "'Space Grotesk', sans-serif", margin: 0 }}>
-                {activeProblem.title}
-              </h1>
-              <span style={{
-                fontSize: '11px', fontFamily: "'JetBrains Mono', monospace", color: '#7a7e9a',
-                background: 'rgba(255,255,255,0.04)', padding: '4px 10px', borderRadius: '6px',
-                border: `1px solid ${s.border}`,
-              }}>
-                {isTieBreaker ? 'BOSS' : `${currentProblemIndex + 1}/${totalProblems}`}
-              </span>
-            </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <span style={{
-                fontSize: '10px', fontWeight: 700, padding: '4px 10px', borderRadius: '6px',
-                background: 'rgba(0,229,255,0.08)', color: '#00e5ff',
-                border: '1px solid rgba(0,229,255,0.15)', textTransform: 'uppercase', letterSpacing: '0.06em',
-              }}>Active</span>
-              <span style={{
-                fontSize: '10px', fontWeight: 600, padding: '4px 10px', borderRadius: '6px',
-                background: 'rgba(255,255,255,0.03)', color: '#7a7e9a',
-                border: `1px solid ${s.border}`, display: 'flex', alignItems: 'center', gap: '4px',
-              }}>
-                <Eye size={10} /> {activeProblem.totalTestCases} Hidden
-              </span>
-            </div>
-          </div>
-
-          {/* Problem Body */}
-          <div style={{ flex: 1, padding: '20px 24px', overflowY: 'auto', paddingBottom: '80px' }}>
-            <p style={{ fontSize: '14px', lineHeight: 1.8, color: '#b0b3cc' }}>
-              {activeProblem.description}
-            </p>
-            {activeProblem.sampleTestCase && (
-              <div style={{ marginTop: '16px', padding: '14px', background: '#0a0b10', borderRadius: '8px', border: `1px solid ${s.borderBright}`, fontSize: '13px', fontFamily: "'JetBrains Mono', monospace", color: '#b0b3cc', whiteSpace: 'pre-wrap', boxShadow: 'inset 0 2px 10px rgba(0,0,0,0.2)' }}>
-                <div style={{ color: '#00e5ff', fontSize: '11px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px' }}>Example</div>
-                {activeProblem.sampleTestCase}
-              </div>
-            )}
-            <div style={{
-              marginTop: '20px', padding: '14px 16px', borderRadius: '10px',
-              background: 'linear-gradient(135deg, rgba(0,229,255,0.04), rgba(124,58,237,0.04))',
-              border: '1px solid rgba(0,229,255,0.1)',
-              fontSize: '12px', color: '#00e5ff', lineHeight: 1.6, fontWeight: 500,
-            }}>
-              ⚡ Test cases are hidden during Ranked Match. Output correct values based on edge conditions.
-            </div>
-          </div>
-
-          {/* Problem Navigation */}
-          <div style={{
-            padding: '12px 24px', borderTop: `1px solid ${s.border}`,
-            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-            background: s.panelBg, flexShrink: 0,
-          }}>
-            <button onClick={() => !isTieBreaker && currentProblemIndex > 0 && setCurrentProblemIndex(p => p - 1)}
-              disabled={isTieBreaker || currentProblemIndex === 0}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '7px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
-                background: 'rgba(255,255,255,0.03)', border: `1px solid ${s.border}`,
-                color: (isTieBreaker || currentProblemIndex === 0) ? '#2a2c40' : '#7a7e9a',
-                cursor: (isTieBreaker || currentProblemIndex === 0) ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
-              }}
-            ><ChevronLeft size={14} /> Previous</button>
-            {/* Problem dots */}
-            <div style={{ display: 'flex', gap: '6px' }}>
-              {!isTieBreaker ? Array.from({ length: totalProblems }).map((_, i) => (
-                <div key={i} onClick={() => setCurrentProblemIndex(i)} style={{
-                  width: i === currentProblemIndex ? '20px' : '8px', height: '8px',
-                  borderRadius: '4px', cursor: 'pointer', transition: 'all 0.3s ease',
-                  background: i === currentProblemIndex
-                    ? 'linear-gradient(90deg, #00e5ff, #7c3aed)'
-                    : 'rgba(255,255,255,0.08)',
-                  boxShadow: i === currentProblemIndex ? '0 0 10px rgba(0,229,255,0.3)' : 'none',
-                }} />
-              )) : (
-                <div style={{
-                  width: '20px', height: '8px', borderRadius: '4px',
-                  background: 'linear-gradient(90deg, #f87171, #ef4444)',
-                  boxShadow: '0 0 10px rgba(239,68,68,0.4)',
-                }} />
-              )}
-            </div>
-            <button onClick={() => !isTieBreaker && currentProblemIndex < totalProblems - 1 && setCurrentProblemIndex(p => p + 1)}
-              disabled={isTieBreaker || currentProblemIndex >= totalProblems - 1}
-              style={{
-                display: 'flex', alignItems: 'center', gap: '6px',
-                padding: '7px 14px', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
-                background: 'rgba(255,255,255,0.03)', border: `1px solid ${s.border}`,
-                color: (isTieBreaker || currentProblemIndex >= totalProblems - 1) ? '#2a2c40' : '#7a7e9a',
-                cursor: (isTieBreaker || currentProblemIndex >= totalProblems - 1) ? 'not-allowed' : 'pointer', transition: 'all 0.2s',
-              }}
-            >Next <ChevronRight size={14} /></button>
-          </div>
-        </div>
-
-        {/* ── RIGHT: IDE Panel (62%) ── */}
-        <div style={{ width: '62%', display: 'flex', flexDirection: 'column', background: '#0d0f13' }}>
-          {/* IDE Toolbar */}
-          <div style={{
-            height: '48px', display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            padding: '0 16px', borderBottom: `1px solid ${s.border}`, flexShrink: 0,
-            background: s.headerBg,
-          }}>
-            <select value={language} onChange={(e) => setLanguage(e.target.value)}
-              style={{
-                background: 'rgba(255,255,255,0.04)', color: '#b0b3cc', fontSize: '12px',
-                border: `1px solid ${s.border}`, borderRadius: '7px', padding: '6px 12px',
-                outline: 'none', fontWeight: 500, cursor: 'pointer',
-              }}
-            >
-              <option value="javascript">JavaScript (Node.js)</option>
-              <option value="typescript">TypeScript</option>
-              <option value="python">Python 3</option>
-              <option value="cpp">C++ (GCC)</option>
-              <option value="java">Java (OpenJDK)</option>
-            </select>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-              <button onClick={handleRunCode}
-                onMouseEnter={() => setRunHover(true)} onMouseLeave={() => setRunHover(false)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                  padding: '7px 16px', borderRadius: '8px', fontSize: '12px', fontWeight: 600,
-                  background: runHover ? 'rgba(255,255,255,0.08)' : 'rgba(255,255,255,0.04)',
-                  border: runHover ? '1px solid rgba(255,255,255,0.15)' : `1px solid ${s.border}`,
-                  color: '#e8eaf0', cursor: 'pointer', transition: 'all 0.2s',
-                }}
-              ><Play size={13} fill="currentColor" /> Run Code</button>
-              <button
-                onMouseEnter={() => setSubmitHover(true)} onMouseLeave={() => setSubmitHover(false)}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '6px',
-                  padding: '7px 20px', borderRadius: '8px', fontSize: '12px', fontWeight: 700,
-                  background: submitHover
-                    ? 'linear-gradient(135deg, #00e5ff, #7c3aed)'
-                    : 'linear-gradient(135deg, rgba(0,229,255,0.85), rgba(124,58,237,0.85))',
-                  border: 'none', color: '#fff', cursor: 'pointer', transition: 'all 0.2s',
-                  boxShadow: submitHover
-                    ? '0 0 20px rgba(0,229,255,0.25), 0 4px 16px rgba(124,58,237,0.2)'
-                    : '0 0 10px rgba(0,229,255,0.1)',
-                  letterSpacing: '0.02em', fontFamily: "'Space Grotesk', sans-serif",
-                }}
-              ><Send size={13} /> Submit</button>
-            </div>
-          </div>
-
-          {/* Code Editor */}
-          <div style={{ flex: 1, position: 'relative' }}>
-            <Editor
-              height="100%"
-              language={language}
-              theme="vs-dark"
-              value={code}
-              onChange={(v) => setCode(v || '')}
-              options={{
-                minimap: { enabled: false },
-                fontSize: 14,
-                fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-                padding: { top: 16 },
-                scrollBeyondLastLine: false,
-                smoothScrolling: true,
-                cursorBlinking: "smooth",
-                renderLineHighlight: "all",
-              }}
-            />
-          </div>
-
-          {/* Console Panel */}
-          <div style={{
-            height: '180px', borderTop: `1px solid ${s.border}`,
-            display: 'flex', flexDirection: 'column', flexShrink: 0, background: s.panelBg,
-          }}>
-            <div style={{
-              height: '34px', display: 'flex', alignItems: 'center', gap: '8px',
-              padding: '0 16px', borderBottom: `1px solid ${s.border}`,
-              background: s.headerBg,
-            }}>
-              <Terminal size={12} color="#7a7e9a" />
-              <span style={{ fontSize: '11px', fontWeight: 700, color: '#7a7e9a', textTransform: 'uppercase', letterSpacing: '0.08em' }}>Console</span>
-            </div>
-            <div style={{
-              flex: 1, padding: '12px 16px', overflowY: 'auto',
-              fontFamily: "'JetBrains Mono', monospace", fontSize: '12px', color: '#7a7e9a', lineHeight: 1.7,
-            }}>
-              {consoleOutput.length === 0
-                ? <span style={{ color: '#2a2c40' }}>Run results will appear here...</span>
-                : consoleOutput.map((line, i) => (
-                    <div key={i} style={{ color: line.includes('Result') ? '#22d3a0' : '#7a7e9a' }}>{line}</div>
-                  ))
-              }
-            </div>
-          </div>
-        </div>
-      </main>
-    </div>
-  );
+  const [user] = useState(readSessionUser);
+  if (!user || !localStorage.getItem('token')) return <Navigate to="/login" replace />;
+  if (!roomId) return <Navigate to="/" replace />;
+  return <BattleWorkspace key={`${user.id}:${roomId}`} roomId={roomId} user={user} />;
 };

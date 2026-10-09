@@ -34,7 +34,7 @@ services:
     image: postgres:16.2
     env_file: judge0.conf
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - data:/var/lib/postgresql/data/
     <<: *default-logging

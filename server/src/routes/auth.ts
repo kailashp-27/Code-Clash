@@ -2,9 +2,10 @@ import express, { type Request, type Response } from 'express';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { prisma } from '../db.js';
+import { config } from '../config.js';
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || 'supersecretjwtkey';
+const JWT_SECRET = config.jwtSecret;
 
 router.post('/register', async (req: Request, res: Response) => {
   try {

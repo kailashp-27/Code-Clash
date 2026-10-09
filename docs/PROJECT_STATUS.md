@@ -1,0 +1,40 @@
+# Code Clash — implementation status
+
+Updated 9 October 2026. This document supersedes the earlier staged task plans.
+
+## Working local product
+
+- Register/sign in, authenticated sockets, database identities and participant-only battle/submission APIs.
+- Rating matchmaking: closest eligible opponent, mutual 100-point window increasing by 50 every 15 seconds up to 400; queue cancellation, duplicate-tab protection and one active battle per account enforced in PostgreSQL.
+- Two shared, immutable assignment snapshots per 30-minute battle: Two Sum and Balanced Brackets. Complete stdin/stdout programs in JavaScript, Python, C++ or Java. Per-problem/language drafts survive reload in session storage.
+- Run public examples and submit all tests through a durable PostgreSQL queue. Real Judge0 execution, application-owned output comparison, bounded resource limits, private hidden diagnostics, idempotent request IDs, quotas, token persistence, leases and bounded infrastructure retries.
+- Saved progress and authoritative deadlines recover across server restarts. Queued jobs resume; interrupted leased jobs become eligible after lease expiry. The first player to solve both wins according to server receipt sequence, after earlier eligible work resolves. At the deadline, eligible work drains; more solved problems wins, equal counts draw. Infrastructure failures cancel without penalties.
+- Explicit forfeits, a 30-second in-process disconnect grace and cancellation if both participants disappear. Every settlement locks the same match/user rows, updates Elo and stats atomically, releases the active-player slots and broadcasts after commit. Concurrent completions cannot award ratings twice.
+- Chess-style Elo with K=32, real win/loss/draw/cancellation debriefs, persistent result retrieval from profile history, and a top-100 leaderboard from account ratings. Equal ratings share a leaderboard position.
+- Profile entirely driven by server data: identity/join date, current rank and progress, wins/losses/draws, leaderboard position, known peak rating, recorded winning streaks, real rating history, topic attempts/solves, accepted solutions and solve times. Old matches without rating snapshots have no fabricated chart points or solve metrics.
+- Six persistent achievements: first battle, first win, first judged solve, ten battles, three consecutive wins and reaching 1400. Progress is recomputed from records; unlocks persist. When old account data lacks the original milestone date, the first observation records its unlock rather than inventing a historical date.
+- Responsive navy/cyan/purple profile and battle screens, accessible history/chart data, loading/retry/empty states, resume-battle action and locally served Monaco assets. The unused prototype debrief and browser scoring helpers were removed.
+- Local post-judging similarity advisory compares eligible completed submissions for the same problem/language. Owner-only signals do not affect Elo. Short/boilerplate code abstains. AI authorship explicitly remains **not assessed**; similarity is not an AI detector or proof of misconduct.
+- Persistent participant reports, an independent moderator review queue, account standing and appeals. Three confirmed distinct battle/problem cases trigger a ban; duplicate reports do not add strikes. Pending reports do not punish accounts. Bans block matchmaking, battle submissions and practice; successful appeals can reverse strikes and restore access.
+- Profile includes Return to lobby and Sign out controls. The result page shows compact scores, Elo and problem breakdowns; saved code review opens a dedicated arena with a themed editor and a Back to result action.
+- Versioned SQL baseline for new databases; existing database schema verified before marking it applied. Exact dependency locks, bounded build compiler memory and repeatable local commands remain in place.
+
+## Verification completed
+
+- `npm run check`: frontend lint, TypeScript and both production builds.
+- `npm test`: 24 transport/queue/integrity tests (database suite is opt-in).
+- `npm run test:integration`: 14 scenarios against a disposable real PostgreSQL database and controlled Judge0 responses, including competing settlement, idempotency, hidden-output privacy, restart recovery, submission receipt fairness, deadline races, draw/cancellation Elo, profile achievements and moderation. The parent suite makes 15 reported tests.
+- Real Docker Judge0: public-example runs and official submissions passed 9 Two Sum tests and 14 Balanced Brackets tests; saved victory, +16 Elo from equal ratings, two solved problems and three unlocked achievements verified through API and browser.
+- All four ranked languages passed stdin/stdout smoke execution under the actual ranked limits. This is not a claim of exhaustive cross-language performance calibration.
+- Browser verified real new-account empty states, earned post-battle profile, history→result retrieval, locally bundled Monaco, saved source review, both players' result screens, mobile result layout, profile/lobby navigation, sign out, protected-route redirects, pending reports, account standing and the approved moderator queue. Preview images show designated local demo accounts.
+- Original application accounts were preserved. The local demo battle uses separate test accounts; no original users were seeded with test wins. Disposable integration databases are removed after testing.
+
+## Remaining before public deployment
+
+1. **Problem bank and competitive formats.** The initial bank has two authored problems. Add many reviewed, versioned problems and private fixtures, publication/admin tooling, randomized eligible assignment, complete reference solutions and runtime calibration in every language. Boss rounds, blitz/blind formats, casual multiplayer and complexity-based scoring are not implemented; the existing casual card opens practice. Runtime metrics are feedback, not the v1 winner rule. No algorithmic complexity or AI coaching claims are fabricated.
+2. **AI/integrity review.** Choose and validate a detector or provenance approach against representative submissions; establish an explicit assistance policy, false-positive evaluation and staffed review procedures. Local similarity, report review, sanctions and appeals are implemented. AI authorship remains unassessed; there is no external detector, and code is not sent to an outside AI service. See the [AICD benchmark](https://arxiv.org/abs/2602.02079) and the integrity plan for limitations.
+3. **Production isolation and operations.** Replace the local privileged Judge0/WSL compatibility setup with reviewed execution isolation and network separation; private judge authentication, output/retention controls, backups, readiness, monitoring, job dashboards and deployment/CI. Local per-account quotas exist; distributed/global capacity limits, registration abuse limits and load tests remain. Test safe executor upgrades and benchmark real worst-case language behavior.
+4. **Multiple application servers.** Match/submission/results state is durable, but matchmaking and socket connectivity/disconnect timers are process-local. A single restarted server recovers assignment/deadline/progress; it does not recover an elapsed disconnect timer. Add shared queue/socket adapter and persistent connectivity/grace policy before horizontally scaling. Worker leases support recovery; external judge execution may repeat across the POST-token persistence crash gap, while match effects stay exactly once.
+5. **Account/product polish.** Email verification/password recovery, session revocation/refresh, profile editing, pagination for very large histories, public profile/privacy controls and operational support. Legacy records with missing rating snapshots cannot be reconstructed accurately without authoritative history. Further keyboard/mobile testing and representative real two-person sessions are appropriate before launch.
+
+The local ranked core, results and data-backed profile are implemented. This status deliberately distinguishes that working product from production readiness and optional competitive formats.

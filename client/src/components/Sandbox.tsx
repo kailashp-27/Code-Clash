@@ -1,5 +1,6 @@
-import React, { useState, useCallback } from 'react';
-import Editor from '@monaco-editor/react';
+import React, { lazy, Suspense, useState, useCallback } from 'react';
+import { apiUrl } from '../utils/api';
+const Editor = lazy(() => import('./LocalCodeEditor'));
 
 const LANGUAGES = [
   { id: 63,  name: 'JavaScript',  monaco: 'javascript',  icon: '⚡', stub: 'console.log("Hello, World!");' },
@@ -66,15 +67,19 @@ export const Sandbox = () => {
     setIsLoading(true);
     setOutput(null);
     try {
-      const res = await fetch('/api/execute', {
+      const res = await fetch(apiUrl('/api/execute'), {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${localStorage.getItem('token') ?? ''}` },
         body: JSON.stringify({ source_code: sourceCode, language_id: language.id, stdin }),
       });
+      if (!res.ok) {
+        const failure = await res.json();
+        throw new Error(failure.error || 'Code execution failed');
+      }
       const data: OutputData = await res.json();
       setOutput(data);
-    } catch {
-      setOutput({ stderr: 'Failed to connect to the server.\nMake sure the server is running on port 5000.' });
+    } catch (error: unknown) {
+      setOutput({ stderr: error instanceof Error ? error.message : 'Failed to connect to the server.' });
     } finally {
       setIsLoading(false);
     }
@@ -247,7 +252,7 @@ export const Sandbox = () => {
 
           {/* Monaco Editor */}
           <div style={{ flex: 1, overflow: 'hidden' }}>
-            <Editor
+            <Suspense fallback={<p role="status">Loading editor…</p>}><Editor
               height="100%"
               theme="vs-dark"
               language={language.monaco}
@@ -266,7 +271,7 @@ export const Sandbox = () => {
                 smoothScrolling: true,
                 tabSize: 2,
               }}
-            />
+            /></Suspense>
           </div>
 
           {/* Stdin Panel (collapsible) */}

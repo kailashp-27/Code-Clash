@@ -11,9 +11,9 @@ npm install
 npm run dev
 ```
 
-Open [localhost:5173](http://localhost:5173). The Vite proxy forwards `/api` to `localhost:5000`. Socket connections use the same address by default; `VITE_SOCKET_URL` overrides the socket URL.
+Open [localhost:5173](http://localhost:5173). The Vite proxy forwards `/api` and Socket.IO to the backend configured by `API_PROXY_TARGET`, defaulting to `localhost:5000`.
 
-Some account requests use `localhost:5000` directly, so changing the socket URL alone does not move the whole client to another backend.
+For a separate backend origin, configure `VITE_API_URL` for HTTP requests and `VITE_SOCKET_URL` for sockets. See `client/.env.example` and the root setup guide.
 
 ## Useful commands
 
@@ -23,4 +23,4 @@ npm run lint
 npm run preview
 ```
 
-`src/pages/` contains the app screens, `src/components/Sandbox.tsx` contains the editor, and `src/stores/useSocketStore.ts` owns the socket connection. The root README covers the current prototype limitations.
+`src/pages/` contains the app screens, `src/components/LocalCodeEditor.tsx` serves the shared editor, and `src/stores/useSocketStore.ts` owns the socket connection. The root README links to delivered features and remaining work.

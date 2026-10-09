@@ -1,80 +1,25 @@
-import express, { type Request, type Response } from 'express';
-import jwt from 'jsonwebtoken';
+import express from 'express';
 import { prisma } from '../db.js';
-
+import { authenticated } from '../authentication.js';
+import { getProfile } from '../profile-data.js';
 const router = express.Router();
-const JWT_SECRET = (process.env.JWT_SECRET || 'supersecretjwtkey') as string;
-
-router.get('/', async (req: Request, res: Response) => {
+router.get('/leaderboard', authenticated, async (_req, res) => {
   try {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ error: 'Unauthorized' });
-    }
-
-    const token = authHeader.split(' ')[1] as string;
-    let decoded: any;
-    try {
-      decoded = jwt.verify(token, JWT_SECRET);
-    } catch (err) {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
-
-    const userId = decoded.userId;
-
-    const user = await prisma.user.findUnique({
-      where: { id: userId },
-      include: {
-        matchesAsPlayer1: {
-          take: 10,
-          orderBy: { createdAt: 'desc' },
-          include: { player2: { select: { username: true } }, winner: { select: { id: true } } }
-        },
-        matchesAsPlayer2: {
-          take: 10,
-          orderBy: { createdAt: 'desc' },
-          include: { player1: { select: { username: true } }, winner: { select: { id: true } } }
-        }
-      }
-    });
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
-    }
-
-    const totalBattles = user.wins + user.losses;
-    const winRate = totalBattles > 0 ? ((user.wins / totalBattles) * 100).toFixed(1) : 0;
-
-    // Combine matches
-    const allMatches = [
-      ...user.matchesAsPlayer1.map(m => ({
-        id: m.id,
-        opponent: m.player2?.username || 'Unknown',
-        isWin: m.winnerId === userId,
-        ratingChange: m.winnerId === userId ? m.winnerRatingChange : m.loserRatingChange,
-        createdAt: m.createdAt
-      })),
-      ...user.matchesAsPlayer2.map(m => ({
-        id: m.id,
-        opponent: m.player1?.username || 'Unknown',
-        isWin: m.winnerId === userId,
-        ratingChange: m.winnerId === userId ? m.winnerRatingChange : m.loserRatingChange,
-        createdAt: m.createdAt
-      }))
-    ].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()).slice(0, 10);
-
-    res.json({
-      rating: user.rating,
-      wins: user.wins,
-      losses: user.losses,
-      totalBattles,
-      winRate,
-      recentMatches: allMatches
-    });
-  } catch (error) {
-    console.error('[Profile Fetch Error]', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({ orderBy: [{ rating: 'desc' }, { createdAt: 'asc' }], take: 100,
+        select: { id: true, username: true, rating: true, wins: true, losses: true, draws: true } }), prisma.user.count(),
+    ]);
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({ total, players: users.map((user, index) => ({ ...user, position: users.findIndex(u => u.rating === user.rating) + 1,
+      isYou: user.id === res.locals.userId, order: index + 1 })) });
+  } catch { res.status(500).json({ error: 'Unable to load the leaderboard.' }); }
 });
-
+router.get('/', authenticated, async (_req, res) => {
+  try {
+    const data = await getProfile(prisma, res.locals.userId);
+    if (!data) return res.status(404).json({ error: 'Account not found.' });
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(data);
+  } catch (error) { console.error('[profile]', error); res.status(500).json({ error: 'Unable to load profile. Please retry.' }); }
+});
 export default router;
